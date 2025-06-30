@@ -6,25 +6,23 @@ module CNNBuffer(
     input                               rst,
 
     input                               req,
-    input [31:0]                        req_addr,
     input                               req_final, // op finish
 
-    output                              nice_icb_cmd_valid,
-    input                               nice_icb_cmd_ready,
-    output [31: 0]                      nice_icb_cmd_addr,
-    input                               nice_icb_rsp_valid,
-    input [31: 0]                       nice_icb_rsp_rdata,
+    output                              lacc_data_valid,
+    input                               lacc_data_ready,
+    input                               lacc_drsp_valid,
+    input [31: 0]                       lacc_drsp_rdata,
 
-    output [`KERNEL_SIZE-1: 0][31: 0]   window,
+    output [`WINDOW_SIZE-1: 0][31: 0]   window,
     output                              window_valid,
-    output                              window_new,
-    output                              window_finish
+    output                              window_finish,
+    input                               window_stall
 );
     reg [$clog2(`BUFFER_WIDTH)-1: 0]    idx_x;
     reg [`BUFFER_DEPTH-1: 0]            vec_y;
     reg                                 last;
     
-    reg [`KERNEL_SIZE-2: 0]             kernel_fill;
+    reg [`KERNEL_SIZE-1: 0]             kernel_fill;
     reg [$clog2(`BUFFER_WIDTH)-1: 0]    kernel_idx_x;
     reg [$clog2(`BUFFER_DEPTH)-1: 0]    kernel_idx_y;
     reg                                 kernel_data_req_end;
@@ -59,19 +57,16 @@ module CNNBuffer(
 
 // channel control
     reg                         cmd_valid_r;
-    reg  [31:0]                 cmd_addr_r;
     reg                         cmd_read_r;
-    wire [31:0]                 cmd_addr_n;
     wire                        cmd_valid_last;
     reg  [$clog2(BUFFER_SIZE)-1: 0]    req_idx_r;
     wire [$clog2(BUFFER_SIZE)-1: 0]    req_idx_n;
     wire                        req_idx_en;
     wire                        cmd_hsk;
 
-    assign cmd_addr_n       = state_idle ? req_addr : cmd_addr_r + 4;
-    assign cmd_valid_last   = state_req & nice_icb_cmd_ready & (req_idx_r == `BUFFER_SIZE - 1);
+    assign cmd_valid_last   = state_req & lacc_data_ready & (req_idx_r == BUFFER_SIZE - 1);
     assign req_idx_en       = req | cmd_hsk;
-    assign cmd_hsk          = nice_icb_cmd_ready & cmd_valid_r;
+    assign cmd_hsk          = lacc_data_ready & cmd_valid_r;
     assign req_idx_n        = idle_exit ? 0 : req_idx_r + 1;
 
     always @(posedge clk)begin
@@ -90,8 +85,7 @@ module CNNBuffer(
         end
     end
     
-    assign nice_icb_cmd_valid   = cmd_valid_r;
-    assign nice_icb_cmd_addr    = cmd_addr_r;
+    assign lacc_data_valid   = cmd_valid_r;
 
 // idx control
 
@@ -104,7 +98,7 @@ module CNNBuffer(
             last  <= 1'b0;
         end
         else begin
-            if(nice_icb_rsp_valid)begin
+            if(lacc_drsp_valid)begin
                 idx_x <= idx_x_max ? 0 : idx_x + 1;
                 if(idx_x_max) begin
                     vec_y <= {vec_y[`BUFFER_DEPTH-2: 0], vec_y[`BUFFER_DEPTH-1]};
@@ -116,14 +110,14 @@ module CNNBuffer(
 
 // buffer control
     wire [`BUFFER_DEPTH-1: 0][31: 0] rdata;
-    genvar i;
+    genvar i, j;
 generate
     for(i=0; i<`BUFFER_DEPTH; i=i+1)begin : gen_buffer
         reg [31: 0] buffer_row [`BUFFER_WIDTH-1: 0];
         assign rdata[i] = buffer_row[kernel_idx_x];
         always_ff @(posedge clk)begin
-            if(nice_icb_rsp_valid & vec_y[i])begin
-                buffer_row[idx_x] <= nice_cib_rsp_rdata;
+            if(lacc_drsp_valid & vec_y[i])begin
+                buffer_row[idx_x] <= lacc_drsp_rdata;
             end
         end
     end
@@ -132,7 +126,7 @@ endgenerate
 // window gen
     Encoder #(`BUFFER_DEPTH) encoder_idx_y (vec_y, idx_y);
 
-    assign kernel_data_req = state_req & ~kernel_data_req_end &
+    assign kernel_data_req = state_req & ~kernel_data_req_end & ~window_stall &
                             ((idx_y > kernel_idx_y) | last | (idx_y == kernel_idx_y) & (kernel_idx_x < idx_x));
     assign kernel_idx_x_max = kernel_idx_x == `BUFFER_WIDTH - 1;
     always @(posedge clk)begin
@@ -145,7 +139,7 @@ endgenerate
         else begin
             if(kernel_data_req)begin
                 kernel_idx_x <= kernel_idx_x_max ? 0 : kernel_idx_x + 1;
-                kernel_fill <= ((kernel_fill << 1) | 1'b1) & {`KERNEL_SIZE-1{~kernel_idx_x_max}};
+                kernel_fill <= ((kernel_fill << 1) | 1'b1) & {`KERNEL_SIZE{~kernel_idx_x_max}};
                 if(kernel_idx_x_max)begin
                     kernel_idx_y <= kernel_idx_y + 1;
                     if(kernel_idx_y == `BUFFER_DEPTH - 1)begin
@@ -159,29 +153,51 @@ endgenerate
 generate
     for(i=0; i<`KERNEL_SIZE; i=i+1)begin : gen_window_rdata
         wire [$clog2(`BUFFER_DEPTH)-1: 0] window_ridx;
-        assign window_ridx = kernel_idx_y - `KERNEL_SIZE - 1 + i;
+        assign window_ridx = kernel_idx_y - `KERNEL_SIZE + 1 + i;
         assign window_rdata[i] = rdata[window_ridx];
     end
 endgenerate
 
 
-    reg [`KERNEL_SIZE-1: 0][31: 0] window_r;
-    reg                            window_valid_r;
-    reg                            window_new_r;
-    always_ff @(posedge clk)begin
-        window_valid_r <= kernel_data_req;
-        window_r <= window_rdata;
-        if(rst | req)begin
-            window_new_r <= 1'b1;
-        end
-        else begin
-            if(kernel_data_req)begin
-                window_new_r <= kernel_idx_x_max;
+    reg [`WINDOW_SIZE-1: 0][31: 0]  window_r;
+    reg                             window_valid_r;
+    reg [$clog2(`KERNEL_SIZE)-1: 0] window_col_idx;
+    reg [`KERNEL_SIZE-1: 0]         window_col;
+
+    Decoder #(`KERNEL_SIZE) decoder_window_col(window_col_idx, window_col);
+
+    wire kernel_fill_all = &kernel_fill;
+generate
+    for(i=0; i<`KERNEL_SIZE; i=i+1)begin : gen_window
+        for(j=0; j<`KERNEL_SIZE; j=j+1)begin : gen_window_row
+            wire window_fill_en = kernel_data_req & (kernel_fill_all | ~kernel_fill_all & window_col[j]);
+            wire [31: 0] window_wdata;
+            if(j != `KERNEL_SIZE - 1)begin
+                assign window_wdata = kernel_fill_all ? window_r[i*`KERNEL_SIZE + j + 1] : window_rdata[i];
+            end else begin
+                assign window_wdata = window_rdata[i];
+            end
+            always @(posedge clk)begin
+                if(window_fill_en) window_r[i * `KERNEL_SIZE + j] <= window_wdata;
             end
         end
     end
-    assign window       = window_r;
-    assign window_valid = window_valid_r;
-    assign window_new   = window_new_r;
-    assign window_finish = kernel_data_req_end;
+endgenerate
+
+    always @(posedge clk)begin
+        if(~window_stall)begin
+            window_valid_r <= kernel_data_req & (&kernel_fill[`KERNEL_SIZE-2: 0]);
+        end
+        if(rst)begin
+            window_col_idx <= 0;
+        end
+        else begin 
+            if(kernel_data_req)begin
+                window_col_idx <= kernel_idx_x_max | (window_col_idx == `KERNEL_SIZE - 1) ? 0 : window_col_idx + 1;
+            end
+        end
+    end
+    assign window           = window_r;
+    assign window_valid     = window_valid_r;
+    assign window_finish    = kernel_data_req_end;
 endmodule

@@ -1,49 +1,56 @@
+`include "CNNConfig.vh"
 
 module CNNAccelerator(
     input                       clk,
     input                       rst,
-    input                       flush,
 
-    // Control cmd_req
-    input                       nice_req_valid,
-    output                      nice_req_ready,
-    input [`NICE_OP_WIDTH-1: 0] nice_req_op,
-    input [6: 0]                nice_req_imm,
-    input [31: 0]               nice_req_rj,
-    input [31: 0]               nice_req_rk,
 
-    // Control cmd_rsp
-    output                      nice_rsp_valid,
-    input                       nice_rsp_ready,
-    output [31: 0]              nice_rsp_rdat,
+    input                       lacc_flush,
 
-    // Memory lsu_req
-    output                      nice_icb_cmd_valid,
-    input                       nice_icb_cmd_ready,
-    output [31: 0]              nice_icb_cmd_addr,
-    output                      nice_icb_cmd_read,
-    output [31: 0]              nice_icb_cmd_wdata,
-    output [1: 0]               nice_icb_cmd_size,
+    input                       lacc_req_valid,
+    input [`LACC_OP_WIDTH-1: 0] lacc_req_op,
+    input [6: 0]                lacc_req_imm,
+    input [31: 0]               lacc_req_rj,
+    input [31: 0]               lacc_req_rk,
 
-    // Memory lsu_rsp
-    input                       nice_icb_rsp_valid,
-    input [31: 0]               nice_icb_rsp_rdata
+    output                      lacc_rsp_valid,
+    output [31: 0]              lacc_rsp_rdat,
+
+    // wreq will also send valid sign
+    output                      lacc_data_valid,
+    input                       lacc_data_ready,
+    output [31: 0]              lacc_data_addr,
+    output                      lacc_data_read,
+    output [31: 0]              lacc_data_wdata,
+    output [1: 0]               lacc_data_size,
+
+    input                       lacc_drsp_valid,
+    input [31: 0]               lacc_drsp_rdata
 );
-
+    wire buffer_cmd_valid;
+    wire buffer_cmd_ready;
+    wire buffer_drsp_valid;
+    wire [31: 0] buffer_cmd_addr;
+    wire [`WINDOW_SIZE*32-1: 0] window;
+    wire window_valid;
+    reg data_req_buf;
 // decode
     wire op_conf_buf;
     wire op_conf_res;
     wire op_conv;
-    assign op_conf_buf  = nice_req_op == 0;
-    assign op_conf_res  = nice_req_op == 1;
-    assign op_conv      = nice_req_op == 2;
+    assign op_conf_buf  = lacc_req_op == 0;
+    assign op_conf_res  = lacc_req_op == 1;
+    assign op_conv      = lacc_req_op == 2;
 
     reg [31: 0] conf_buf_addr;
     reg [`WEIGHT_SIZE-1: 0][31: 0] conf_res_addr;
 
     always @(posedge clk)begin
-        if(nice_req_valid & op_conf_buf)begin
-            conf_buf_addr <= nice_req_rj;
+        if(lacc_req_valid & op_conf_buf)begin
+            conf_buf_addr <= lacc_req_rj;
+        end
+        else if(buffer_cmd_valid & buffer_cmd_ready)begin
+            conf_buf_addr <= conf_buf_addr + 4;
         end
     end
 
@@ -51,7 +58,7 @@ module CNNAccelerator(
     parameter FSM_WIDTH = 2;
     parameter IDLE      = 'b0;
     parameter WEIGHT    = 'b1;
-    parameter CONV      = 'b2;
+    parameter CONV      = 'd2;
     reg [FSM_WIDTH-1: 0] state_r;
     wire [FSM_WIDTH-1: 0] nxt_state;
     wire state_en;
@@ -59,6 +66,7 @@ module CNNAccelerator(
     wire weight_exit;
     wire conv_exit;
     wire window_finish;
+    wire window_stall;
     wire res_buf_empty;
 
     wire state_idle     = state_r == IDLE;
@@ -66,15 +74,15 @@ module CNNAccelerator(
     wire state_conv     = state_r == CONV;
 
     assign state_en = idle_exit | weight_exit | conv_exit;
-    assign idle_exit = state_idle & nice_req_valid & op_conv;
-    assign weight_exit = state_weight & weight_cmd_end & nice_icb_rsp_valid;
+    assign idle_exit = state_idle & lacc_req_valid & op_conv;
+    assign weight_exit = state_weight & weight_cmd_end & lacc_drsp_valid;
     assign conv_exit = state_conv & window_finish & res_buf_empty;
     assign nxt_state = {FSM_WIDTH{idle_exit}} & WEIGHT |
                        {FSM_WIDTH{weight_exit}} & CONV |
                        {FSM_WIDTH{conv_exit}} & IDLE;
 
-    always_ff @(posedge clk)begin
-        if(rst | flush)begin
+    always @(posedge clk)begin
+        if(rst | lacc_flush)begin
             state_r <= IDLE;
         end
         else begin
@@ -83,21 +91,23 @@ module CNNAccelerator(
     end
 
 // weight control
-    reg [`WEIGHT_SIZE*`KERNEL_SIZE-1:0][31:0] weight_buf;
-    reg [$clog2(`WEIGHT_SIZE*`KERNEL_SIZE)-1:0] weight_idx;
+    reg [`WEIGHT_SIZE*`WINDOW_SIZE-1:0][31:0] weight_buf;
+    reg [$clog2(`WEIGHT_SIZE*`WINDOW_SIZE)-1:0] weight_idx, weight_req_idx;
     reg weight_cmd_end;
     reg [31: 0] weight_addr;
     wire weight_cmd_valid;
-    wire weight_cmd_hsk = weight_cmd_valid & nice_icb_cmd_ready;
+    wire weight_data_valid;
+    wire weight_cmd_hsk = weight_cmd_valid & lacc_data_ready;
 
     assign weight_cmd_valid = state_weight & ~weight_cmd_end;
+    assign weight_data_valid = state_weight & lacc_drsp_valid;
 
     always @(posedge clk)begin
-        if(weight_cmd_hsk)begin
-            weight_buf[weight_idx] <= nice_icb_rsp_rdata;
+        if(weight_data_valid)begin
+            weight_buf[weight_idx] <= lacc_drsp_rdata;
         end
         if(idle_exit)begin
-            weight_addr <= nice_req_rj;
+            weight_addr <= lacc_req_rj;
         end
         if(weight_cmd_hsk)begin
             weight_addr <= weight_addr + 4;
@@ -105,82 +115,92 @@ module CNNAccelerator(
         if(rst | idle_exit)begin
             weight_cmd_end <= 1'b0;
             weight_idx <= 0;
+            weight_req_idx <= 0;
         end
         else begin
-            if(state_weight & weight_cmd_hsk & (weight_idx == `WEIGHT_SIZE*`KERNEL_SIZE - 1)) begin
+            if(state_weight & weight_cmd_hsk & (weight_req_idx == `WEIGHT_SIZE*`WINDOW_SIZE - 1)) begin
                 weight_cmd_end <= 1'b1;
             end
             if(weight_cmd_hsk)begin
+                weight_req_idx <= weight_req_idx + 1;
+            end
+            if(weight_data_valid)begin
                 weight_idx <= weight_idx + 1;
             end
         end
     end
 
 // input buffer
-    wire buffer_cmd_valid;
-    wire buffer_cmd_ready;
-    wire [31: 0] buffer_cmd_addr;
-    wire [`KERNEL_SIZE*32-1: 0] window;
-    wire window_valid;
-    wire window_new;
 
+    assign buffer_cmd_addr = conf_buf_addr;
+    assign buffer_cmd_ready = lacc_data_ready;
+    assign buffer_drsp_valid = lacc_drsp_valid & data_req_buf;
     CNNBuffer buffer(
         .clk(clk),
         .rst(rst),
         .req(weight_exit),
-        .req_addr(conf_buf_addr),
         .req_final(conv_exit),
-        .nice_icb_cmd_valid(buffer_cmd_valid),
-        .nice_icb_cmd_ready(buffer_cmd_ready),
-        .nice_icb_cmd_addr(buffer_cmd_addr),
-        .nice_icb_rsp_valid(nice_icb_rsp_valid),
-        .nice_icb_rsp_rdata(nice_icb_rsp_rdata),
+        .lacc_data_valid(buffer_cmd_valid),
+        .lacc_data_ready(buffer_cmd_ready),
+        .lacc_drsp_valid(buffer_drsp_valid),
+        .lacc_drsp_rdata(lacc_drsp_rdata),
         .window(window),
         .window_valid(window_valid),
-        .window_new(window_new),
-        .window_finish(window_finish)
+        .window_finish(window_finish),
+        .window_stall(window_stall)
     );
 
 // conv
     wire [`WEIGHT_SIZE-1: 0][31: 0] conv_data;
     wire [`WEIGHT_SIZE-1: 0] conv_valid;
+    wire res_buf_stall;
+
     CNNConv conv(
         .clk(clk),
         .rst(rst),
         .window_valid(window_valid),
-        .window_new(window_new),
         .window(window),
         .weight(weight_buf),
         .conv_data(conv_data),
-        .conv_valid(conv_valid)
+        .conv_valid(conv_valid),
+        .window_stall(window_stall),
+        .stall(res_buf_stall)
     );
 
 // result buffer
+    parameter WEIGHT_WIDTH = $clog2(`WEIGHT_SIZE);
     wire res_cmd_valid;
     wire res_cmd_ready;
     wire res_cmd_hsk;
+    wire res_addr_we;
+    wire [WEIGHT_WIDTH-1: 0] res_addr_widx;
+    wire [31: 0] res_addr_wdata;
     wire [31: 0] res_cmd_addr;
+    wire [31: 0] res_cmd_addr_n4;
     wire [31: 0] res_cmd_wdata;
-    reg [$clog2(`WEIGHT_SIZE)-1: 0] res_weight_idx;
+    reg [WEIGHT_WIDTH-1: 0] res_weight_idx;
     wire [`WEIGHT_SIZE-1: 0] res_weight_vec;
     wire [`WEIGHT_SIZE-1: 0] res_buf_valid;
+    wire [`WEIGHT_SIZE-1: 0] res_buf_full;
     wire [`WEIGHT_SIZE-1: 0][31: 0] res_buf_rdata;
 
     Decoder #(`WEIGHT_SIZE) decoder_res_weight(res_weight_idx, res_weight_vec);
-    assign res_cmd_valid = |(res_weight_vec & res_buf_valid);
-    assign res_cmd_ready = ~buffer_cmd_valid;
-    assign res_cmd_addr = conf_res_addr[res_weight_idx];
-    assign res_cmd_wdata = res_buf_rdata[res_weight_idx];
-    assign res_buf_empty = ~(|res_buf_valid);
+    assign res_cmd_valid    = |(res_weight_vec & res_buf_valid);
+    assign res_cmd_ready    = ~buffer_cmd_valid & lacc_data_ready;
+    assign res_cmd_hsk      = res_cmd_valid & res_cmd_ready;
+    assign res_cmd_addr     = conf_res_addr[res_weight_idx];
+    assign res_cmd_wdata    = res_buf_rdata[res_weight_idx];
+    assign res_buf_empty    = ~(|res_buf_valid);
+    assign res_buf_stall    = |res_buf_full;
+    assign res_cmd_addr_n4  = res_cmd_addr + 4;
 
+    assign res_addr_widx = {WEIGHT_WIDTH{lacc_req_valid & op_conf_res}} & lacc_req_rk[WEIGHT_WIDTH-1:0] |
+                           {WEIGHT_WIDTH{res_cmd_hsk}} & res_weight_idx;
+    assign res_addr_we   = lacc_req_valid & op_conf_res | res_cmd_hsk;
+    assign res_addr_wdata = {32{lacc_req_valid & op_conf_res}} & lacc_req_rj |
+                            {32{res_cmd_hsk}} & res_cmd_addr_n4;   
     always @(posedge clk)begin
-
-        if(nice_req_valid & op_conf_res)begin
-            conf_res_addr[nice_req_imm[$clog2(`WEIGHT_SIZE)-1:0]] <= nice_req_rj;
-        end
-        if(res_cmd_hsk)begin
-            conf_res_addr[res_weight_idx] <= res_cmd_addr[res_weight_idx] + 4;
-        end
+        if(res_addr_we) conf_res_addr[res_addr_widx] <= res_addr_wdata;
         if(rst)begin
             res_weight_idx <= 0;
         end
@@ -203,9 +223,10 @@ generate
         wire empty = equal & ~dir_xor;
         assign res_buf_valid[i] = ~empty;
         assign res_buf_rdata[i] = res_buf[head];
-        always_ff @(posedge clk)begin
-            if(state_conv & conv_valid[i])begin
-                res_buf[i][tail] <= conv_data[i];
+        assign res_buf_full[i]  = full;
+        always @(posedge clk)begin
+            if(state_conv & conv_valid[i] & ~res_buf_stall)begin
+                res_buf[tail] <= conv_data[i];
             end
 
             if(rst)begin
@@ -215,7 +236,7 @@ generate
                 tdir <= 1'b0;
             end
             else begin
-                if(state_conv & conv_valid[i])begin
+                if(state_conv & conv_valid[i] & ~res_buf_stall)begin
                     tail <= tail + 1;
                     if(&tail)begin
                         tdir <= ~tdir;
@@ -232,15 +253,17 @@ generate
     end
 endgenerate
 
-    assign nice_req_ready = 1'b1;
-    assign nice_rsp_valid = op_conf_buf | conv_exit | op_conf_res;
-    assign nice_rsp_rdat  = 0;
+    always @(posedge clk)begin
+        data_req_buf <= buffer_cmd_valid;
+    end
+    assign lacc_rsp_valid = op_conf_buf | conv_exit | op_conf_res;
+    assign lacc_rsp_rdat  = 0;
 
-    assign nice_icb_cmd_valid = weight_cmd_valid | buffer_cmd_valid | res_cmd_valid;
-    assign nice_icb_cmd_addr = weight_cmd_valid ? weight_addr :
-                               buffer_cmd_valid ? buffer_cmd_addr : res_cmd_addr;
-    assign nice_icb_cmd_read = res_cmd_valid & ~buffer_cmd_valid;
-    assign nice_icb_cmd_wdata = res_cmd_wdata;
-    assign nice_icb_cmd_size = 2'b10;
+    assign lacc_data_valid = weight_cmd_valid | buffer_cmd_valid | res_cmd_valid;
+    assign lacc_data_addr = weight_cmd_valid ? weight_addr :
+                            buffer_cmd_valid ? buffer_cmd_addr : res_cmd_addr;
+    assign lacc_data_read = ~(res_cmd_valid & ~buffer_cmd_valid);
+    assign lacc_data_wdata = res_cmd_wdata;
+    assign lacc_data_size = 2'b10;
 
 endmodule
