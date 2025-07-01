@@ -9,6 +9,7 @@
 `define BUFFER_WIDTH 8
 `define WEIGHT_SIZE 3
 `define RES_BUF_SIZE 8
+`define MAX_STRIDE_WIDTH 2
 
 `define POOL_MODE 3
 `define POOL_MODE_WIDTH $clog2(`POOL_MODE)

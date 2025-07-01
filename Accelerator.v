@@ -37,6 +37,10 @@ module CNNAccelerator(
     reg data_req_buf;
     reg [`KERNEL_WIDTH-1: 0] conf_kernel_width;
     reg [`KERNEL_WIDTH-1: 0] conf_kernel_height;
+    reg [$clog2(`BUFFER_DEPTH)-1: 0] conf_buf_depth;
+    reg [$clog2(`BUFFER_WIDTH)-1: 0] conf_buf_width;
+    wire [`KERNEL_SIZE: 0] kernel_width_vec, kernel_height_vec;
+    reg conf_refresh;
 // decode
     wire op_conf_buf;
     wire op_conf_res;
@@ -49,18 +53,22 @@ module CNNAccelerator(
     reg [`WEIGHT_SIZE-1: 0][31: 0] conf_res_addr;
 
     always @(posedge clk)begin
+        conf_refresh <= lacc_req_valid & op_conf_buf;
         if(lacc_req_valid & op_conf_buf)begin
             conf_buf_addr <= lacc_req_rj;
-
         end
         else if(buffer_cmd_valid & buffer_cmd_ready)begin
             conf_buf_addr <= conf_buf_addr + 4;
         end
         if(lacc_req_valid & op_conf_buf)begin
             conf_kernel_width <= lacc_req_rk[0 +: `KERNEL_WIDTH];
-            conf_kernel_height <= lacc_req_rk[`KERNEL_WIDTH +: `KERNEL_WIDTH];
+            conf_kernel_height <= lacc_req_rk[4 +: `KERNEL_WIDTH];
+            conf_buf_width <= lacc_req_rk[8 +: $clog2(`BUFFER_WIDTH)];
+            conf_buf_depth <= lacc_req_rk[14 +: $clog2(`BUFFER_DEPTH)];
         end
     end
+    Decoder #(`KERNEL_SIZE+1) decoder_kernel_width(conf_kernel_width, kernel_width_vec);
+    Decoder #(`KERNEL_SIZE+1) decoder_kernel_height(conf_kernel_height, kernel_height_vec);
 
 // state
     parameter FSM_WIDTH = 2;
@@ -151,6 +159,8 @@ module CNNAccelerator(
         .rst(rst),
         .kernel_width_i(conf_kernel_width),
         .kernel_height_i(conf_kernel_height),
+        .buffer_width_i(conf_buf_width),
+        .buffer_depth_i(conf_buf_depth),
         .req(buffer_req),
         .req_final(conv_exit),
         .lacc_data_valid(buffer_cmd_valid),
@@ -194,8 +204,10 @@ module CNNAccelerator(
     CNNPool pool(
         .clk(clk),
         .rst(rst),
+        .conf_refresh(conf_refresh),
+        .kernel_height(kernel_height_vec[`KERNEL_SIZE: 1]),
+        .kernel_width(kernel_width_vec[`KERNEL_SIZE: 1]),
         .stall(res_buf_stall),
-        .kernel_width(conf_kernel_width),
         .pool_mode(pool_mode),
         .window_valid(pool_window_valid),
         .window(window),

@@ -4,7 +4,10 @@ module CNNPool(
     input clk,
     input rst,
     input stall,
-    input [`KERNEL_WIDTH-1: 0]      kernel_width,
+    input                           conf_refresh,
+    input [`KERNEL_SIZE-1: 0]     kernel_height,
+    input [`KERNEL_SIZE-1: 0]      kernel_width,
+
     input [`POOL_MODE_WIDTH-1: 0]   pool_mode,
 
     input                           window_valid,
@@ -16,22 +19,37 @@ module CNNPool(
     wire [`POOL_MODE-1: 0]          pool_mode_vec;
     reg [`WINDOW_SIZE: 0]           pool_valid_r;
     reg [`WINDOW_SIZE-1: 0][31: 0]  res_r;
+    parameter PVW = $clog2(`WINDOW_SIZE+1);
+    reg [PVW-1: 0] pool_valid_idx;
+    wire [PVW-1: 0] pool_valid_idx_n;
 
+    assign pool_valid_idx_n = {PVW{kernel_height[1] & kernel_width[1]}} & 'd5 |
+                              {PVW{kernel_height[2] & kernel_width[2]}} & 'd9;
+
+    always @(posedge clk)begin
+        if(rst)begin
+            pool_valid_idx <= 0;
+        end
+        else if(conf_refresh)begin
+            pool_valid_idx <= pool_valid_idx_n;
+        end
+    end
 
     always @(posedge clk)begin
         if(rst)begin
             pool_valid_r <= 0;
         end
         else if(!stall_all)begin
-            pool_valid_r <= {window_valid, pool_valid_r[`WINDOW_SIZE: 1]};
+            pool_valid_r <= {pool_valid_r[`WINDOW_SIZE-1: 0], window_valid};
         end
     end
 
     Decoder #(`POOL_MODE) decoder_pool_mode(pool_mode, pool_mode_vec);
     wire stall_all = pool_valid & stall;
     assign window_stall = stall_all;
-    assign pool_valid = pool_valid_r[0];
-    assign pool_data  = res_r[`WINDOW_SIZE-1];
+    assign pool_valid = pool_valid_r[pool_valid_idx];
+    wire [PVW-1: 0] pool_data_idx = pool_valid_idx - 1;
+    assign pool_data  = res_r[pool_data_idx];
     genvar i, j;
 generate
     for(i=0; i<`WINDOW_SIZE; i=i+1)begin: gen_pool
