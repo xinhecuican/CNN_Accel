@@ -11,14 +11,14 @@ module CNNPool(
     input [`POOL_MODE_WIDTH-1: 0]   pool_mode,
 
     input                           window_valid,
-    input [`WINDOW_SIZE-1: 0][31:0] window,
+    input [`WINDOW_SIZE*32-1: 0]    window,
     output                          window_stall,
     output [31: 0]                  pool_data,
     output                          pool_valid
 );
     wire [`POOL_MODE-1: 0]          pool_mode_vec;
     reg [`WINDOW_SIZE: 0]           pool_valid_r;
-    reg [`WINDOW_SIZE-1: 0][31: 0]  res_r;
+    reg [`WINDOW_SIZE*32-1: 0]      res_r;
     parameter PVW = $clog2(`WINDOW_SIZE+1);
     reg [PVW-1: 0] pool_valid_idx;
     wire [PVW-1: 0] pool_valid_idx_n;
@@ -49,41 +49,41 @@ module CNNPool(
     assign window_stall = stall_all;
     assign pool_valid = pool_valid_r[pool_valid_idx];
     wire [PVW-1: 0] pool_data_idx = pool_valid_idx - 1;
-    assign pool_data  = res_r[pool_data_idx];
+    assign pool_data  = res_r[pool_data_idx*32 +: 32];
     genvar i, j;
 generate
     for(i=0; i<`WINDOW_SIZE; i=i+1)begin: gen_pool
-        reg [i: 0][31: 0] buffer_i;
+        reg [(i+1)*32-1: 0] buffer_i;
         always @(posedge clk)begin
             if(~stall_all)begin
                 if(window_valid)begin
-                    buffer_i[i] <= window[i];
+                    buffer_i[i*32 +: 32] <= window[i*32 +: 32];
                 end
                 else begin
-                    buffer_i[i] <= 0;
+                    buffer_i[i*32 +: 32] <= 0;
                 end
             end
         end
 
         for(j=i-1; j>=0; j=j-1)begin
             always @(posedge clk)begin
-                if(~stall_all) buffer_i[j] <= buffer_i[j+1];
+                if(~stall_all) buffer_i[j*32 +: 32] <= buffer_i[(j+1) * 32 +: 32];
             end
         end
         wire [31: 0] res;
         if(i != 0)begin
             PoolPE pe(
                 .pool_mode(pool_mode_vec),
-                .pool_data(res_r[i-1]),
-                .data(buffer_i[0]),
+                .pool_data(res_r[(i-1)*32 +: 32]),
+                .data(buffer_i[31: 0]),
                 .data_o(res)
             );
         end
         else begin
-            assign res = buffer_i[0];
+            assign res = buffer_i[31: 0];
         end
         always @(posedge clk)begin
-            if(!stall_all) res_r[i] <= res;
+            if(!stall_all) res_r[i*32 +: 32] <= res;
         end
     end
 endgenerate

@@ -4,17 +4,17 @@ module CNNConv (
     input clk,
     input rst,
     input stall,
-    input [`WEIGHT_SIZE-1: 0][`WINDOW_SIZE-1: 0][31: 0] weight,
+    input [`WEIGHT_SIZE*`WINDOW_SIZE*32-1: 0] weight,
 
     input                               window_valid,
-    input [`WINDOW_SIZE-1: 0][31: 0]    window,
+    input [`WINDOW_SIZE*32-1: 0]        window,
     output                              window_stall,
-    output [`WEIGHT_SIZE-1: 0][31: 0]   conv_data,
+    output [`WEIGHT_SIZE*32-1: 0]       conv_data,
     output [`WEIGHT_SIZE-1: 0]          conv_valid
 );
 
     reg [`WINDOW_SIZE+`WEIGHT_SIZE-1: 0] conv_valid_r;
-    reg [`WINDOW_SIZE-1: 0][`WEIGHT_SIZE-1: 0][31: 0] res_r;
+    reg [`WINDOW_SIZE*`WEIGHT_SIZE*32-1: 0] res_r;
 
     wire stall_all      = (|conv_valid) & stall;
     assign window_stall = stall_all;
@@ -28,34 +28,34 @@ module CNNConv (
         end
     end
 
-    assign conv_data = res_r[`WINDOW_SIZE-1];
+    assign conv_data = res_r[(`WINDOW_SIZE-1)*`WEIGHT_SIZE*32 +: `WEIGHT_SIZE*32];
     genvar i, j;
 generate
-    for(i=0; i<`WEIGHT_SIZE; i++)begin
+    for(i=0; i<`WEIGHT_SIZE; i=i+1)begin
         assign conv_valid[i] = conv_valid_r[`WEIGHT_SIZE-1-i];
     end
     for(i=0; i<`WINDOW_SIZE; i=i+1)begin
-        reg [i: 0][31: 0] input_buffer;
+        reg [(i+1)*32-1: 0] input_buffer;
         always @(posedge clk)begin
             if(~stall_all)begin
                 if(window_valid)begin
-                    input_buffer[i] <= window[i];
+                    input_buffer[i*32 +: 32] <= window[i*32 +: 32];
                 end
                 else begin
-                    input_buffer[i] <= 0;
+                    input_buffer[i*32 +: 32] <= 0;
                 end
             end
         end
         for(j=i-1; j>=0; j=j-1)begin
             always @(posedge clk)begin
-                if(~stall_all) input_buffer[j] <= input_buffer[j+1];
+                if(~stall_all) input_buffer[j*32 +: 32] <= input_buffer[(j+1)*32 +: 32];
             end
         end
 
-        reg [`WEIGHT_SIZE-2: 0][31: 0] d_r;
-        wire [`WEIGHT_SIZE-1: 0][31: 0] d_o;
+        reg [(`WEIGHT_SIZE-1)*32-1: 0] d_r;
+        wire [`WEIGHT_SIZE*32-1: 0] d_o;
         always @(posedge clk)begin
-            if(~stall_all) d_r <= d_o[`WEIGHT_SIZE-2: 0];
+            if(~stall_all) d_r <= d_o[(`WEIGHT_SIZE-1)*32-1: 0];
         end
         for(j=0; j<`WEIGHT_SIZE; j=j+1)begin
             wire [31: 0] d_conv, d_i;
@@ -63,25 +63,25 @@ generate
                 assign d_conv = 0;
             end
             else begin
-                assign d_conv = res_r[i-1][j];
+                assign d_conv = res_r[((i-1)*`WEIGHT_SIZE+j)*32 +: 32];
             end
             if(j == 0)begin
-                assign d_i = input_buffer[0];
+                assign d_i = input_buffer[31: 0];
             end
             else begin
-                assign d_i = d_r[j-1];
+                assign d_i = d_r[(j-1)*32 +: 32];
             end
 
             wire [31: 0] res;
             ConvPE #(i) pe (
                 .d_conv(d_conv),
                 .d(d_i),
-                .w(weight[j][i]),
-                .d_o(d_o[j]),
+                .w(weight[(j*`WINDOW_SIZE+i)*32 +: 32]),
+                .d_o(d_o[j*32 +: 32]),
                 .res(res)
             );
             always @(posedge clk)begin
-                if(~stall_all) res_r[i][j] <= res;
+                if(~stall_all) res_r[(i*`WEIGHT_SIZE+j)*32 +: 32] <= res;
             end
         end
     end

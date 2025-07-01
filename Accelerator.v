@@ -1,4 +1,5 @@
 `include "CNNConfig.vh"
+`include "mycpu.h"
 
 module CNNAccelerator(
     input                       clk,
@@ -50,7 +51,7 @@ module CNNAccelerator(
     assign op_conv      = lacc_req_op == 2;
 
     reg [31: 0] conf_buf_addr;
-    reg [`WEIGHT_SIZE-1: 0][31: 0] conf_res_addr;
+    reg [`WEIGHT_SIZE*32-1: 0] conf_res_addr;
 
     always @(posedge clk)begin
         conf_refresh <= lacc_req_valid & op_conf_buf;
@@ -109,7 +110,7 @@ module CNNAccelerator(
     end
 
 // weight control
-    reg [`WEIGHT_SIZE*`WINDOW_SIZE-1:0][31:0] weight_buf;
+    reg [`WEIGHT_SIZE*`WINDOW_SIZE*32-1:0] weight_buf;
     reg [$clog2(`WEIGHT_SIZE*`WINDOW_SIZE)-1:0] weight_idx, weight_req_idx;
     reg weight_cmd_end;
     reg [31: 0] weight_addr;
@@ -122,7 +123,7 @@ module CNNAccelerator(
 
     always @(posedge clk)begin
         if(weight_data_valid)begin
-            weight_buf[weight_idx] <= lacc_drsp_rdata;
+            weight_buf[weight_idx*32 +: 32] <= lacc_drsp_rdata;
         end
         if(idle_exit)begin
             weight_addr <= lacc_req_rj;
@@ -176,7 +177,7 @@ module CNNAccelerator(
 // conv
     reg conv_op;
     reg pool_op;
-    wire [`WEIGHT_SIZE-1: 0][31: 0] conv_data;
+    wire [`WEIGHT_SIZE*32-1: 0] conv_data;
     wire [`WEIGHT_SIZE-1: 0] conv_valid;
     wire res_buf_stall;
     wire [31: 0] pool_data;
@@ -245,16 +246,16 @@ module CNNAccelerator(
     wire [`WEIGHT_SIZE-1: 0] res_weight_vec;
     wire [`WEIGHT_SIZE-1: 0] res_buf_valid;
     wire [`WEIGHT_SIZE-1: 0] res_buf_full;
-    wire [`WEIGHT_SIZE-1: 0][31: 0] res_buf_rdata;
-    wire [`WEIGHT_SIZE-1: 0][31: 0] res_buf_wdata;
+    wire [`WEIGHT_SIZE*32-1: 0] res_buf_rdata;
+    wire [`WEIGHT_SIZE*32-1: 0] res_buf_wdata;
     wire [`WEIGHT_SIZE-1: 0] res_buf_en;
 
     Decoder #(`WEIGHT_SIZE) decoder_res_weight(res_weight_idx, res_weight_vec);
     assign res_cmd_valid    = |(res_weight_vec & res_buf_valid);
     assign res_cmd_ready    = ~buffer_cmd_valid & lacc_data_ready;
     assign res_cmd_hsk      = res_cmd_valid & res_cmd_ready;
-    assign res_cmd_addr     = conf_res_addr[res_weight_idx];
-    assign res_cmd_wdata    = res_buf_rdata[res_weight_idx];
+    assign res_cmd_addr     = conf_res_addr[res_weight_idx*32 +: 32];
+    assign res_cmd_wdata    = res_buf_rdata[res_weight_idx*32 +: 32];
     assign res_buf_empty    = ~(|res_buf_valid);
     assign res_buf_stall    = |res_buf_full;
     assign res_cmd_addr_n4  = res_cmd_addr + 4;
@@ -267,7 +268,7 @@ module CNNAccelerator(
                             {32{res_cmd_hsk}} & res_cmd_addr_n4;  
     assign res_weight_en = res_cmd_hsk & conv_op;
     always @(posedge clk)begin
-        if(res_addr_we) conf_res_addr[res_addr_widx] <= res_addr_wdata;
+        if(res_addr_we) conf_res_addr[res_addr_widx*32 +: 32] <= res_addr_wdata;
         if(rst | idle_exit)begin
             res_weight_idx <= 0;
         end
@@ -281,7 +282,7 @@ module CNNAccelerator(
     genvar i;
 generate
     for(genvar i=0; i<`WEIGHT_SIZE; i=i+1)begin : gen_res_buf
-        reg [`RES_BUF_SIZE-1: 0][31: 0] res_buf;
+        reg [`RES_BUF_SIZE*32-1: 0] res_buf;
         reg [$clog2(`RES_BUF_SIZE)-1: 0] head, tail;
         reg hdir, tdir;
         wire equal = head == tail;
@@ -289,18 +290,18 @@ generate
         wire full = equal & dir_xor;
         wire empty = equal & ~dir_xor;
         assign res_buf_valid[i] = ~empty;
-        assign res_buf_rdata[i] = res_buf[head];
+        assign res_buf_rdata[i*32 +: 32] = res_buf[head*32 +: 32];
         assign res_buf_full[i]  = full;
         if(i == 0)begin
-            assign res_buf_wdata[i] = {32{conv_valid[i]}} & conv_data[i] |
+            assign res_buf_wdata[i*32 +: 32] = {32{conv_valid[i]}} & conv_data[i*32 +: 32] |
                                       {32{pool_valid}} & pool_data;
         end
         else begin
-            assign res_buf_wdata[i] = conv_data[i];
+            assign res_buf_wdata[i*32 +: 32] = conv_data[i*32 +: 32];
         end
         always @(posedge clk)begin
             if(state_conv & res_buf_en[i] & ~res_buf_stall)begin
-                res_buf[tail] <= res_buf_wdata[i];
+                res_buf[tail*32 +: 32] <= res_buf_wdata[i*32 +: 32];
             end
 
             if(rst)begin

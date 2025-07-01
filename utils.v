@@ -15,10 +15,10 @@ generate
 		localparam REMAIN_NUM = REMAIN < STEP_NUM ? 0 : STEP_NUM - REMAIN;
 		localparam ALL_NUM = FULL_STEP_NUM * STEP_NUM + REMAIN_NUM;
 		wire [ALL_NUM-1: 0] out_t;
-		for(j=0; j<FULL_STEP_NUM; j++)begin
+		for(j=0; j<FULL_STEP_NUM; j=j+1)begin
 			assign out_t[j*STEP_NUM +: STEP_NUM] = in[j*STEP+STEP_NUM +: STEP_NUM];
 		end
-		for(j=0; j<REMAIN_NUM; j++)begin
+		for(j=0; j<REMAIN_NUM; j=j+1)begin
 			assign out_t[ALL_NUM-1-j] = in[RADIX-1-j];
 		end
 		assign out[i] = |out_t;
@@ -35,7 +35,7 @@ module Decoder #(
 );
 genvar i;
 generate
-	for(i=0; i<RADIX; i++)begin
+	for(i=0; i<RADIX; i=i+1)begin
 		assign out[i] = in == i;
 	end
 endgenerate
