@@ -73,7 +73,7 @@ generate
             end
 
             wire [31: 0] res;
-            CNNPE #(i) pe (
+            ConvPE #(i) pe (
                 .d_conv(d_conv),
                 .d(d_i),
                 .w(weight[j][i]),
@@ -89,7 +89,7 @@ endgenerate
 
 endmodule
 
-module CNNPE #(
+module ConvPE #(
     parameter WITH_ADD=1
 )(
     input [31: 0] d_conv,
