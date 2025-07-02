@@ -10,6 +10,7 @@ module CNNBuffer(
     input [$clog2(`BUFFER_DEPTH)-1: 0]  buffer_depth_i,
     input [$clog2(`BUFFER_WIDTH)-1: 0]  buffer_width_i,
     input [`STRIDE_WIDTH-1: 0]          stride_i,
+    input [`KERNEL_WIDTH-1: 0]          padding_i,
 
     input                               req,
     input                               req_final, // op finish
@@ -31,8 +32,8 @@ module CNNBuffer(
     reg [$clog2(`BUFFER_DEPTH)-1: 0]    req_idx_y;
     
     reg [`KERNEL_SIZE-1: 0]             kernel_fill;
-    reg [$clog2(`BUFFER_WIDTH): 0]    kernel_idx_x;
-    reg [$clog2(`BUFFER_DEPTH): 0]    kernel_idx_y;
+    reg [$clog2(`BUFFER_WIDTH): 0]      kernel_idx_x;
+    reg [$clog2(`BUFFER_DEPTH): 0]      kernel_idx_y;
     reg                                 kernel_data_req_end;
     wire [$clog2(`BUFFER_DEPTH)-1: 0]   idx_y;
     wire                                kernel_data_req;
@@ -112,7 +113,7 @@ module CNNBuffer(
                 idx_x <= idx_x_max ? 0 : idx_x + 1;
                 if(idx_x_max) begin
                     vec_y <= {vec_y[`BUFFER_DEPTH-2: 0], vec_y[`BUFFER_DEPTH-1]};
-                    last <= vec_y[`BUFFER_DEPTH-1];
+                    last <= vec_y[buffer_depth_i];
                 end
             end
         end
@@ -139,6 +140,7 @@ endgenerate
     wire [`STRIDE_WIDTH-1: 0] kernel_fill_shift_idx;
     wire [`KERNEL_SIZE-1: 0]        window_col;
     reg kernel_next_line;
+    wire [$clog2(`BUFFER_WIDTH): 0] padding_expand, padding_sub;
 
     wire [`KERNEL_WIDTH-1: 0] kernel_fill_all_idx;
     assign kernel_fill_all_idx = kernel_width_i - 1;
@@ -148,23 +150,26 @@ endgenerate
 
     assign kernel_data_req = state_req & ~kernel_data_req_end & ~window_stall &
                             ((idx_y > kernel_idx_y) | last | (idx_y == kernel_idx_y) & (kernel_idx_x < idx_x));
-    assign kernel_idx_x_max = kernel_idx_x == buffer_width_i;
+    assign kernel_idx_x_max = kernel_idx_x == buffer_width_i + padding_i;
+
+    assign padding_expand = padding_i;
+    assign padding_sub = (~padding_i) + 1;
     always @(posedge clk)begin
         buffer_depth_n <= buffer_depth_i + 1;
         kernel_next_line <= kernel_data_req & kernel_idx_x_max;
         if(rst | req)begin
             kernel_fill <= 0;
-            kernel_idx_x <= 0;
-            kernel_idx_y <= kernel_height_i - 1;
+            kernel_idx_x <= padding_sub;
+            kernel_idx_y <= kernel_height_i - 1 - padding_i;
             kernel_data_req_end <= 1'b0;
         end 
         else begin
             if(kernel_data_req)begin
-                kernel_idx_x <= kernel_idx_x_max ? 0 : kernel_idx_x + 1;
+                kernel_idx_x <= kernel_idx_x_max ? padding_sub : kernel_idx_x + 1;
                 kernel_fill <= (((kernel_fill & {`KERNEL_SIZE{~kernel_next_line}}) >> kernel_fill_shift_idx) | window_col);
                 if(kernel_idx_x_max)begin
                     kernel_idx_y <= kernel_idx_y + stride_i;
-                    if(kernel_idx_y >= buffer_depth_n - stride_i)begin
+                    if(kernel_idx_y >= buffer_depth_n - stride_i + padding_i)begin
                         kernel_data_req_end <= 1'b1;
                     end
                 end
@@ -172,11 +177,15 @@ endgenerate
         end
     end
 
+    wire [`KERNEL_SIZE-1: 0] kernel_row_ov;
 generate
     for(i=0; i<`KERNEL_SIZE; i=i+1)begin : gen_window_rdata
-        wire [$clog2(`BUFFER_DEPTH)-1: 0] window_ridx;
+        wire [$clog2(`BUFFER_DEPTH): 0] window_ridx;
         assign window_ridx = kernel_idx_y - kernel_height_i + 1 + i;
-        assign window_rdata[i*32 +: 32] = rdata[window_ridx*32 +: 32];
+        wire [$clog2(`BUFFER_DEPTH)-1: 0] window_ridx_valid;
+        assign window_ridx_valid        = window_ridx[$clog2(`BUFFER_DEPTH)-1: 0];
+        assign kernel_row_ov[i]         = window_ridx[$clog2(`BUFFER_DEPTH)];
+        assign window_rdata[i*32 +: 32] = rdata[window_ridx_valid*32 +: 32];
     end
 endgenerate
 
@@ -199,7 +208,7 @@ generate
             assign shift_idx = i * `KERNEL_SIZE + j + stride_i;
             assign window_wdata = ~kernel_height_mask[i] | ~kernel_width_mask[j] ? 0 :
                                   kernel_fill_all & ~window_col[j] ? window_r[shift_idx*32 +: 32] : 
-                                                                    window_rdata[i*32 +: 32];
+                                {32{~kernel_idx_x[$clog2(`BUFFER_DEPTH)] & ~kernel_row_ov[i]}} & window_rdata[i*32 +: 32];
 
             always @(posedge clk)begin
                 if(window_fill_en) window_r[(i * `KERNEL_SIZE + j)*32 +: 32] <= window_wdata;

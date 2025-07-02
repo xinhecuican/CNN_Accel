@@ -42,6 +42,7 @@ module CNNAccelerator(
     reg [$clog2(`BUFFER_WIDTH)-1: 0]    conf_buf_width;
     reg [`STRIDE_WIDTH-1: 0]            conf_stride;
     reg [$clog2(`WEIGHT_SIZE)-1: 0]     conf_weight_num;
+    reg [`KERNEL_WIDTH-1: 0]            conf_padding;
     wire [`KERNEL_SIZE: 0] kernel_width_vec, kernel_height_vec;
     reg conf_refresh;
 // decode
@@ -70,6 +71,7 @@ module CNNAccelerator(
             conf_buf_depth      <= lacc_req_rk[14 +: $clog2(`BUFFER_DEPTH)];
             conf_stride         <= lacc_req_rk[20 +: `STRIDE_WIDTH];
             conf_weight_num     <= lacc_req_rk[24 +: $clog2(`WEIGHT_SIZE)];
+            conf_padding        <= lacc_req_rk[28 +: `KERNEL_WIDTH];
         end
     end
     Decoder #(`KERNEL_SIZE+1) decoder_kernel_width(conf_kernel_width, kernel_width_vec);
@@ -206,6 +208,7 @@ module CNNAccelerator(
         .buffer_width_i(conf_buf_width),
         .buffer_depth_i(conf_buf_depth),
         .stride_i(conf_stride),
+        .padding_i(conf_padding),
         .req(buffer_req),
         .req_final(conv_exit),
         .lacc_data_valid(buffer_cmd_valid),
@@ -300,6 +303,7 @@ module CNNAccelerator(
     wire [`WEIGHT_SIZE*32-1: 0] res_buf_rdata;
     wire [`WEIGHT_SIZE*32-1: 0] res_buf_wdata;
     wire [`WEIGHT_SIZE-1: 0] res_buf_en;
+    reg  [`WEIGHT_SIZE-1: 0] conf_res_buf_valid;
 
     Decoder #(`WEIGHT_SIZE) decoder_res_weight(res_weight_idx, res_weight_vec);
     assign res_cmd_valid    = |(res_weight_vec & res_buf_valid);
@@ -310,7 +314,7 @@ module CNNAccelerator(
     assign res_buf_empty    = ~(|res_buf_valid);
     assign res_buf_stall    = |res_buf_full;
     assign res_cmd_addr_n4  = res_cmd_addr + 4;
-    assign res_buf_en       = conv_valid | pool_valid;
+    assign res_buf_en       = conf_res_buf_valid & (conv_valid | pool_valid);
 
     assign res_addr_widx = {WEIGHT_WIDTH{lacc_req_valid & op_conf_res}} & lacc_req_rk[WEIGHT_WIDTH-1:0] |
                            {WEIGHT_WIDTH{res_cmd_hsk}} & res_weight_idx;
@@ -319,13 +323,14 @@ module CNNAccelerator(
                             {32{res_cmd_hsk}} & res_cmd_addr_n4;  
     assign res_weight_en = res_cmd_hsk & conv_op;
     always @(posedge clk)begin
+        if(conf_refresh) conf_res_buf_valid <= (1 << (conf_weight_num+1)) - 1;
         if(res_addr_we) conf_res_addr[res_addr_widx*32 +: 32] <= res_addr_wdata;
         if(rst | idle_exit)begin
             res_weight_idx <= 0;
         end
         else begin
             if(res_weight_en)begin
-                res_weight_idx <= res_weight_idx == `WEIGHT_SIZE - 1 ? 0 : res_weight_idx + 1;
+                res_weight_idx <= res_weight_idx == conf_weight_num ? 0 : res_weight_idx + 1;
             end
         end
     end
