@@ -36,10 +36,12 @@ module CNNAccelerator(
     wire [`WINDOW_SIZE*32-1: 0] window;
     wire window_valid;
     reg data_req_buf;
-    reg [`KERNEL_WIDTH-1: 0] conf_kernel_width;
-    reg [`KERNEL_WIDTH-1: 0] conf_kernel_height;
-    reg [$clog2(`BUFFER_DEPTH)-1: 0] conf_buf_depth;
-    reg [$clog2(`BUFFER_WIDTH)-1: 0] conf_buf_width;
+    reg [`KERNEL_WIDTH-1: 0]            conf_kernel_width;
+    reg [`KERNEL_WIDTH-1: 0]            conf_kernel_height;
+    reg [$clog2(`BUFFER_DEPTH)-1: 0]    conf_buf_depth;
+    reg [$clog2(`BUFFER_WIDTH)-1: 0]    conf_buf_width;
+    reg [`STRIDE_WIDTH-1: 0]            conf_stride;
+    reg [$clog2(`WEIGHT_SIZE)-1: 0]     conf_weight_num;
     wire [`KERNEL_SIZE: 0] kernel_width_vec, kernel_height_vec;
     reg conf_refresh;
 // decode
@@ -62,10 +64,12 @@ module CNNAccelerator(
             conf_buf_addr <= conf_buf_addr + 4;
         end
         if(lacc_req_valid & op_conf_buf)begin
-            conf_kernel_width <= lacc_req_rk[0 +: `KERNEL_WIDTH];
-            conf_kernel_height <= lacc_req_rk[4 +: `KERNEL_WIDTH];
-            conf_buf_width <= lacc_req_rk[8 +: $clog2(`BUFFER_WIDTH)];
-            conf_buf_depth <= lacc_req_rk[14 +: $clog2(`BUFFER_DEPTH)];
+            conf_kernel_width   <= lacc_req_rk[0 +: `KERNEL_WIDTH];
+            conf_kernel_height  <= lacc_req_rk[4 +: `KERNEL_WIDTH];
+            conf_buf_width      <= lacc_req_rk[8 +: $clog2(`BUFFER_WIDTH)];
+            conf_buf_depth      <= lacc_req_rk[14 +: $clog2(`BUFFER_DEPTH)];
+            conf_stride         <= lacc_req_rk[20 +: `STRIDE_WIDTH];
+            conf_weight_num     <= lacc_req_rk[24 +: $clog2(`WEIGHT_SIZE)];
         end
     end
     Decoder #(`KERNEL_SIZE+1) decoder_kernel_width(conf_kernel_width, kernel_width_vec);
@@ -111,40 +115,79 @@ module CNNAccelerator(
 
 // weight control
     reg [`WEIGHT_SIZE*`WINDOW_SIZE*32-1:0] weight_buf;
-    reg [$clog2(`WEIGHT_SIZE*`WINDOW_SIZE)-1:0] weight_idx, weight_req_idx;
+    reg [$clog2(`WEIGHT_SIZE)-1: 0] weight_size, req_weight_size;
+    reg [`KERNEL_WIDTH-1: 0] weight_row_idx, weight_col_idx;
+    reg [`KERNEL_WIDTH-1: 0] req_weight_row_idx, req_weight_col_idx;
+    reg [$clog2(`WEIGHT_SIZE*`WINDOW_SIZE)-1:0] weight_idx, weight_line_idx, weight_page_idx;
+    wire [$clog2(`WEIGHT_SIZE*`WINDOW_SIZE)-1:0] weight_line_idx_n, weight_page_idx_n;
     reg weight_cmd_end;
     reg [31: 0] weight_addr;
+    wire weight_addr_en;
+    wire [31: 0] nxt_weight_addr;
     wire weight_cmd_valid;
     wire weight_data_valid;
     wire weight_cmd_hsk = weight_cmd_valid & lacc_data_ready;
 
     assign weight_cmd_valid = state_weight & ~weight_cmd_end;
     assign weight_data_valid = state_weight & lacc_drsp_valid;
+    assign weight_addr_en = idle_exit | weight_cmd_hsk;
+    assign nxt_weight_addr = {32{idle_exit}} & lacc_req_rj |
+                             {32{weight_cmd_hsk}} & (weight_addr + 4);
+
+    wire req_weight_size_end    = req_weight_size == conf_weight_num;
+    wire req_weight_row_end     = req_weight_row_idx == conf_kernel_height - 1;
+    wire req_weight_col_end     = req_weight_col_idx == conf_kernel_width - 1;
+    wire weight_size_end        = weight_size == conf_weight_num;
+    wire weight_row_end         = weight_row_idx == conf_kernel_height - 1;
+    wire weight_col_end         = weight_col_idx == conf_kernel_width - 1;
+
+    assign weight_line_idx_n    = weight_line_idx + `KERNEL_SIZE;
+    assign weight_page_idx_n    = weight_page_idx + `WINDOW_SIZE;
 
     always @(posedge clk)begin
         if(weight_data_valid)begin
             weight_buf[weight_idx*32 +: 32] <= lacc_drsp_rdata;
         end
-        if(idle_exit)begin
-            weight_addr <= lacc_req_rj;
-        end
-        if(weight_cmd_hsk)begin
-            weight_addr <= weight_addr + 4;
-        end
+        if(weight_addr_en) weight_addr <= nxt_weight_addr;
         if(rst | idle_exit)begin
             weight_cmd_end <= 1'b0;
             weight_idx <= 0;
-            weight_req_idx <= 0;
+            weight_size <= 0;
+            req_weight_size <= 0;
+            weight_row_idx <= 0;
+            weight_col_idx <= 0;
+            req_weight_col_idx <= 0;
+            req_weight_row_idx <= 0;
+            weight_line_idx <= 0;
+            weight_page_idx <= 0;
         end
         else begin
-            if(state_weight & weight_cmd_hsk & (weight_req_idx == `WEIGHT_SIZE*`WINDOW_SIZE - 1)) begin
+            if(state_weight & weight_cmd_hsk & 
+                req_weight_col_end & req_weight_row_end & req_weight_size_end) begin
                 weight_cmd_end <= 1'b1;
             end
             if(weight_cmd_hsk)begin
-                weight_req_idx <= weight_req_idx + 1;
+                req_weight_col_idx <= req_weight_col_end ? 0 : req_weight_col_idx + 1;
+                if(req_weight_col_end)begin
+                    req_weight_row_idx <= req_weight_row_end ? 0 : req_weight_row_idx + 1;
+                    if(req_weight_row_end)begin
+                        req_weight_size <= req_weight_size + 1;
+                    end
+                end
+
             end
             if(weight_data_valid)begin
-                weight_idx <= weight_idx + 1;
+                weight_idx <= weight_col_end & weight_row_end ? weight_page_idx_n :
+                              weight_col_end ? weight_line_idx_n : weight_idx + 1;
+                weight_col_idx <= weight_col_end ? 0 : weight_col_idx + 1;
+                if(weight_col_end)begin
+                    weight_row_idx <= weight_row_end ? 0 : weight_row_idx + 1;
+                    weight_line_idx <= weight_row_end ? weight_page_idx_n : weight_line_idx_n;
+                    if(weight_row_end)begin
+                        weight_size <= weight_size + 1;
+                        weight_page_idx <= weight_page_idx_n;
+                    end
+                end
             end
         end
     end
@@ -162,6 +205,7 @@ module CNNAccelerator(
         .kernel_height_i(conf_kernel_height),
         .buffer_width_i(conf_buf_width),
         .buffer_depth_i(conf_buf_depth),
+        .stride_i(conf_stride),
         .req(buffer_req),
         .req_final(conv_exit),
         .lacc_data_valid(buffer_cmd_valid),
@@ -177,6 +221,7 @@ module CNNAccelerator(
 // conv
     reg conv_op;
     reg pool_op;
+    reg act_op;
     wire [`WEIGHT_SIZE*32-1: 0] conv_data;
     wire [`WEIGHT_SIZE-1: 0] conv_valid;
     wire res_buf_stall;
@@ -192,6 +237,10 @@ module CNNAccelerator(
     CNNConv conv(
         .clk(clk),
         .rst(rst),
+        .act_valid(act_op),
+        .conf_refresh(conf_refresh),
+        .kernel_height(kernel_height_vec[`KERNEL_SIZE: 1]),
+        .kernel_width(kernel_width_vec[`KERNEL_SIZE: 1]),
         .window_valid(conv_window_valid),
         .window(window),
         .weight(weight_buf),
@@ -223,10 +272,12 @@ module CNNAccelerator(
         if(rst)begin
             conv_op <= 0;
             pool_op <= 0;
+            act_op  <= 0;
         end
         else if(lacc_req_valid & op_conv)begin
             conv_op <= lacc_req_imm[0];
             pool_op <= lacc_req_imm[1];
+            act_op  <= lacc_req_imm[2];
         end
     end
 

@@ -3,7 +3,7 @@
 
 `define KERNEL_SIZE 3
 `define KERNEL_WIDTH $clog2(`KERNEL_SIZE)
-`define STRIDE 1
+`define STRIDE_WIDTH 2
 `define WINDOW_SIZE (`KERNEL_SIZE * `KERNEL_SIZE)
 `define BUFFER_DEPTH 8
 `define BUFFER_WIDTH 8

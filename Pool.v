@@ -22,6 +22,7 @@ module CNNPool(
     parameter PVW = $clog2(`WINDOW_SIZE+1);
     reg [PVW-1: 0] pool_valid_idx;
     wire [PVW-1: 0] pool_valid_idx_n;
+    wire [31: 0] pool_res;
 
     assign pool_valid_idx_n = {PVW{kernel_height[1] & kernel_width[1]}} & 'd5 |
                               {PVW{kernel_height[2] & kernel_width[2]}} & 'd9;
@@ -49,7 +50,9 @@ module CNNPool(
     assign window_stall = stall_all;
     assign pool_valid = pool_valid_r[pool_valid_idx];
     wire [PVW-1: 0] pool_data_idx = pool_valid_idx - 1;
-    assign pool_data  = res_r[pool_data_idx*32 +: 32];
+    assign pool_res = res_r[pool_data_idx*32 +: 32];
+    // 只支持kernel_size == 2的平均池化
+    assign pool_data  = pool_mode_vec[2] & kernel_height[1] & kernel_width[1] ? pool_res >> 2 : pool_res;
     genvar i, j;
 generate
     for(i=0; i<`WINDOW_SIZE; i=i+1)begin: gen_pool

@@ -5,6 +5,10 @@ module CNNConv (
     input rst,
     input stall,
     input [`WEIGHT_SIZE*`WINDOW_SIZE*32-1: 0] weight,
+    input                               act_valid,
+    input                               conf_refresh,
+    input [`KERNEL_SIZE-1: 0]           kernel_height,
+    input [`KERNEL_SIZE-1: 0]           kernel_width,
 
     input                               window_valid,
     input [`WINDOW_SIZE*32-1: 0]        window,
@@ -13,26 +17,42 @@ module CNNConv (
     output [`WEIGHT_SIZE-1: 0]          conv_valid
 );
 
-    reg [`WINDOW_SIZE+`WEIGHT_SIZE-1: 0] conv_valid_r;
+    reg [`WINDOW_SIZE+`WEIGHT_SIZE-1: 0]    conv_valid_r;
     reg [`WINDOW_SIZE*`WEIGHT_SIZE*32-1: 0] res_r;
+    wire [`WEIGHT_SIZE*32-1: 0]             res, relu_o;
+    parameter CVW = $clog2(`WINDOW_SIZE+`WEIGHT_SIZE);
+    reg [CVW-1: 0] conv_valid_idx;
+    wire [CVW-1: 0] conv_valid_idx_n;
 
     wire stall_all      = (|conv_valid) & stall;
     assign window_stall = stall_all;
 
+    assign conv_valid_idx_n = {CVW{kernel_height[1] & kernel_width[1]}} & 'd4 |
+                              {CVW{kernel_height[2] & kernel_width[2]}} & 'd8;
+
     always @(posedge clk)begin
         if(rst)begin
             conv_valid_r <= 0;
+            conv_valid_idx <= 0;
         end
-        else if(!stall_all)begin
-            conv_valid_r <= {window_valid, conv_valid_r[`WINDOW_SIZE+`WEIGHT_SIZE-1: 1]};
+        else begin
+            if(conf_refresh)begin
+                conv_valid_idx <= conv_valid_idx_n;
+            end
+            if(!stall_all)begin
+                conv_valid_r <= {conv_valid_r[`WINDOW_SIZE+`WEIGHT_SIZE-2: 0], window_valid};
+            end
         end
     end
 
-    assign conv_data = res_r[(`WINDOW_SIZE-1)*`WEIGHT_SIZE*32 +: `WEIGHT_SIZE*32];
+    assign res       = res_r[conv_valid_idx*`WEIGHT_SIZE*32 +: `WEIGHT_SIZE*32];
+    assign conv_data = act_valid ? relu_o : res;
+
     genvar i, j;
 generate
     for(i=0; i<`WEIGHT_SIZE; i=i+1)begin
-        assign conv_valid[i] = conv_valid_r[`WEIGHT_SIZE-1-i];
+        assign conv_valid[i] = conv_valid_r[conv_valid_idx+1+i];
+        Relu relu(res[i*32 +: 32], relu_o[i*32 +: 32]);
     end
     for(i=0; i<`WINDOW_SIZE; i=i+1)begin
         reg [(i+1)*32-1: 0] input_buffer;
