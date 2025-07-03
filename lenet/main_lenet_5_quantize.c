@@ -1,10 +1,10 @@
 #define _CRT_SECURE_NO_WARNINGS
 #include <stdio.h>
 #include <stdlib.h>
-#include "tensor.h"
 #include <math.h>
 #include <stdint.h>
 #include <time.h>
+#define LABEL_LEN 10000
 
 void relu_int(int32_t *x, int size) {
     for (int i = 0; i < size; i++) {
@@ -33,7 +33,7 @@ void softmax(int32_t *x, float *output, int size) {
     }
 }
 
-void Prediction(float image[28][28],
+void Prediction(int8_t image[28][28],
     int8_t w_conv1[6][3][3],
     int8_t w_conv2[16][6][3][3],
     int8_t w_fc1[10][576],
@@ -46,18 +46,19 @@ void Prediction(float image[28][28],
     // Conv1 layer
     int32_t conv1_out[6][28][28] = { 0 };
     for (int c = 0; c < 6; c++) {
-        for (int h = 0; h < 28; h++) {
-            for (int w = 0; w < 28; w++) {
+        for (int h = -1, h2=0; h < 27; h++, h2++) {
+            for (int w = -1, w2=0; w < 27; w++, w2++) {
                 for (int m = 0; m < 3; m++) {
                     for (int n = 0; n < 3; n++) {
-                        conv1_out[c][h][w] += image[h][w] * w_conv1[c][m][n];
+                        int h_m = h + m;
+                        int w_n = w + n;
+                        if (h_m < 0 || w_n < 0 || h_m >= 28 || w_n >= 28) continue;
+                        conv1_out[c][h2][w2] += image[h_m][w_n] * w_conv1[c][m][n];
                     }
                 }
-                conv1_out[c][h][w] += b_conv1[c];
+                conv1_out[c][h2][w2] += b_conv1[c];
             }
-
         }
-
     }
 
 
@@ -131,9 +132,8 @@ void Prediction(float image[28][28],
     }
 
     // Softmax
-    softmax(fc3_out, probs, 10);
+    softmax(fc1_out, probs, 10);
 }
-
 
 
 int main(int argc, char** argv) {
@@ -155,9 +155,13 @@ int main(int argc, char** argv) {
     /* Load Weights from DDR->LMM */
     fp = fopen("data/weights_int8/w_conv1.txt", "r");
     for (i = 0; i < 6; i++) {
-        int temp;
-        fscanf(fp, "%d ", &temp);
-        w_conv1[i][0][0] = (int8_t)temp;
+        for (int m = 0; m < 3; m++) {
+            for (int n = 0; n < 3; n++) {
+                int temp;
+                fscanf(fp, "%d ", &temp);
+                w_conv1[i][m][n] = (int8_t)temp;
+            }
+        }
     }
     fclose(fp);
 
@@ -176,8 +180,8 @@ int main(int argc, char** argv) {
     fclose(fp);
 
     fp = fopen("data/weights_int8/w_fc1.txt", "r");
-    for (i = 0; i < 120; i++) {
-        for (j = 0; j < 400; j++) {
+    for (i = 0; i < 10; i++) {
+        for (j = 0; j < 576; j++) {
             int temp;
             fscanf(fp, "%d ", &temp);
             w_fc1[i][j] = (int8_t)temp;
@@ -222,6 +226,7 @@ int main(int argc, char** argv) {
         fscanf(fp, "%f ", &(dataset[i]));  fclose(fp);
 
     float image[28][28];
+    int8_t image_int[28][28];
     float* datain;
     int acc = 0;
     int mm, nn;
@@ -231,11 +236,14 @@ int main(int argc, char** argv) {
     {
 
         datain = &dataset[i * 28 * 28];
-        for (mm = 0; mm < 28; mm++)
-            for (nn = 0; nn < 28; nn++)
+        for (mm = 0; mm < 28; mm++){
+            for (nn = 0; nn < 28; nn++){
                 image[mm][nn] = *(float*)&datain[28 * mm + nn];
+                image_int[mm][nn] = image[mm][nn] * 2;
+            }
+        }
 
-        Prediction(image,
+        Prediction(image_int,
             w_conv1,
             w_conv2,
             w_fc1,
