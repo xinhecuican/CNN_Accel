@@ -40,3 +40,21 @@ generate
 	end
 endgenerate
 endmodule
+
+module RDataGen(
+    input [1: 0] size,
+    input [1: 0] offset,
+    input [31: 0] data,
+    output [31: 0] data_o
+);
+    wire [7: 0] byte_data;
+    wire [15: 0] half;
+    wire [31: 0] word;
+    assign byte_data = data[offset*8 +: 8];
+    assign half = {16{offset[1]}} & data[31: 16] |
+				  {16{~offset[1]}} & data[15: 0];
+    assign word = data;
+	assign data_o = {32{size[1]}} & word |
+					{32{size[0]}} & {{16{half[15]}}, half} |
+					{32{~|size}} & {{24{byte_data[7]}}, byte_data};
+endmodule

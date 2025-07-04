@@ -43,6 +43,8 @@ module CNNAccelerator(
     reg [`STRIDE_WIDTH-1: 0]            conf_stride;
     reg [$clog2(`WEIGHT_SIZE)-1: 0]     conf_weight_num;
     reg [`KERNEL_WIDTH-1: 0]            conf_padding;
+    reg [1: 0]                          conf_weight_size;
+    reg [1: 0]                          conf_buf_size;
     wire [`KERNEL_SIZE: 0] kernel_width_vec, kernel_height_vec;
     reg conf_refresh;
 // decode
@@ -66,12 +68,14 @@ module CNNAccelerator(
         end
         if(lacc_req_valid & op_conf_buf)begin
             conf_kernel_width   <= lacc_req_rk[0 +: `KERNEL_WIDTH];
-            conf_kernel_height  <= lacc_req_rk[4 +: `KERNEL_WIDTH];
-            conf_buf_width      <= lacc_req_rk[8 +: $clog2(`BUFFER_WIDTH)];
-            conf_buf_depth      <= lacc_req_rk[14 +: $clog2(`BUFFER_DEPTH)];
-            conf_stride         <= lacc_req_rk[20 +: `STRIDE_WIDTH];
-            conf_weight_num     <= lacc_req_rk[24 +: $clog2(`WEIGHT_SIZE)];
-            conf_padding        <= lacc_req_rk[28 +: `KERNEL_WIDTH];
+            conf_kernel_height  <= lacc_req_rk[3 +: `KERNEL_WIDTH];
+            conf_buf_width      <= lacc_req_rk[6 +: $clog2(`BUFFER_WIDTH)];
+            conf_buf_depth      <= lacc_req_rk[12 +: $clog2(`BUFFER_DEPTH)];
+            conf_stride         <= lacc_req_rk[18 +: `STRIDE_WIDTH];
+            conf_weight_num     <= lacc_req_rk[22 +: $clog2(`WEIGHT_SIZE)];
+            conf_padding        <= lacc_req_rk[24 +: `KERNEL_WIDTH];
+            conf_weight_size    <= lacc_req_rk[28 +: 2];
+            conf_buf_size       <= lacc_req_rk[30 +: 2];
         end
     end
     Decoder #(`KERNEL_SIZE+1) decoder_kernel_width(conf_kernel_width, kernel_width_vec);
@@ -124,6 +128,9 @@ module CNNAccelerator(
     wire [$clog2(`WEIGHT_SIZE*`WINDOW_SIZE)-1:0] weight_line_idx_n, weight_page_idx_n;
     reg weight_cmd_end;
     reg [31: 0] weight_addr;
+    reg [1: 0] weight_offset;
+    wire [2: 0] weight_addr_cin;
+    wire [31: 0] weight_data_in;
     wire weight_addr_en;
     wire [31: 0] nxt_weight_addr;
     wire weight_cmd_valid;
@@ -133,8 +140,9 @@ module CNNAccelerator(
     assign weight_cmd_valid = state_weight & ~weight_cmd_end;
     assign weight_data_valid = state_weight & lacc_drsp_valid;
     assign weight_addr_en = idle_exit | weight_cmd_hsk;
+    assign weight_addr_cin = {conf_weight_size[1], conf_weight_size[0], ~(|conf_weight_size)};
     assign nxt_weight_addr = {32{idle_exit}} & lacc_req_rj |
-                             {32{weight_cmd_hsk}} & (weight_addr + 4);
+                             {32{weight_cmd_hsk}} & (weight_addr + weight_addr_cin);
 
     wire req_weight_size_end    = req_weight_size == conf_weight_num;
     wire req_weight_row_end     = req_weight_row_idx == conf_kernel_height - 1;
@@ -146,9 +154,11 @@ module CNNAccelerator(
     assign weight_line_idx_n    = weight_line_idx + `KERNEL_SIZE;
     assign weight_page_idx_n    = weight_page_idx + `WINDOW_SIZE;
 
+    RDataGen weight_data_gen (conf_weight_size, weight_offset, lacc_drsp_rdata, weight_data_in);
+
     always @(posedge clk)begin
         if(weight_data_valid)begin
-            weight_buf[weight_idx*32 +: 32] <= lacc_drsp_rdata;
+            weight_buf[weight_idx*32 +: 32] <= weight_data_in;
         end
         if(weight_addr_en) weight_addr <= nxt_weight_addr;
         if(rst | idle_exit)begin
@@ -162,6 +172,7 @@ module CNNAccelerator(
             req_weight_row_idx <= 0;
             weight_line_idx <= 0;
             weight_page_idx <= 0;
+            weight_offset <= 0;
         end
         else begin
             if(state_weight & weight_cmd_hsk & 
@@ -179,6 +190,7 @@ module CNNAccelerator(
 
             end
             if(weight_data_valid)begin
+                weight_offset <= weight_offset + weight_addr_cin;
                 weight_idx <= weight_col_end & weight_row_end ? weight_page_idx_n :
                               weight_col_end ? weight_line_idx_n : weight_idx + 1;
                 weight_col_idx <= weight_col_end ? 0 : weight_col_idx + 1;
@@ -209,6 +221,7 @@ module CNNAccelerator(
         .buffer_depth_i(conf_buf_depth),
         .stride_i(conf_stride),
         .padding_i(conf_padding),
+        .buf_size_i(conf_buf_size),
         .req(buffer_req),
         .req_final(conv_exit),
         .lacc_data_valid(buffer_cmd_valid),
