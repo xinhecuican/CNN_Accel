@@ -4,7 +4,7 @@
 #include <math.h>
 #include <stdint.h>
 #include <time.h>
-#define LABEL_LEN 10000
+#define LABEL_LEN 2
 
 void relu_int(int32_t *x, int size) {
     for (int i = 0; i < size; i++) {
@@ -33,6 +33,74 @@ void softmax(int32_t *x, float *output, int size) {
     }
 }
 
+void conv_func(int8_t* d_i, int8_t* weight, int32_t* bias, int32_t* d_o, int8_t di_type,
+                int height, int width, int padding, int channel, int out_channel, 
+                int kernel_width, int kernel_height) {
+	// 使用多重循环卷积(BUF_HEIGHT - KERNEL_SIZE + PADDING * 2) / STRIDE + 1
+    int16_t* d_16 = (int16_t*)d_i;
+    int32_t* d_32 = (int32_t*)d_i;
+    int height_o = (height - kernel_height + padding * 2) + 1;
+    int width_o = (width - kernel_width + padding * 2) + 1;
+	for (int c = 0; c < out_channel; c++) {
+		for (int h = -padding; h < (height - kernel_height + padding) + 1; h++) {
+			for (int w = -padding; w < (width - kernel_width + padding) + 1; w++) {
+                int32_t sum = 0;
+                for(int k = 0; k < channel; k++) {
+                    for (int m = 0; m < kernel_height; m++) {
+                        for (int n = 0; n < kernel_width; n++) {
+                            int h_m = h + m;
+                            int w_n = w + n;
+                            if (h_m >= 0 && h_m < height && w_n >= 0 && w_n < width) {
+                                if(di_type == 0){
+                                    sum += d_i[(k * height + h_m) * width + w_n] * 
+                                        weight[((c * channel + k) * kernel_height + m) * kernel_width + n];
+                                } else if (di_type == 1) {
+                                    sum += d_16[(k * height + h_m) * width + w_n] * 
+                                        weight[((c * channel + k) * kernel_height + m) * kernel_width + n];
+                                } else if (di_type == 2) {
+                                    sum += d_32[(k * height + h_m) * width + w_n] * 
+                                        weight[((c * channel + k) * kernel_height + m) * kernel_width + n];
+                                }
+                            }
+                        }
+                    }
+                }
+                d_o[c * height_o * width_o + (h+padding) * width_o + w + padding] = sum + bias[c];
+			}
+		}
+	}
+}
+
+void pool_func(int32_t* d_i, int32_t* d_o, int channel, int height, int width) {
+	for (int c = 0; c < channel; c++) {
+		for (int h = 0; h < height / 2; h++) {
+			for (int w = 0; w < width / 2; w++) {
+				int32_t sum = d_i[(c * height + (h << 1)) * width + (w << 1)] +
+                             d_i[(c * height + (h << 1) + 1) * width + (w << 1)] +
+                             d_i[(c * height + (h << 1)) * width + (w << 1) + 1] +
+                             d_i[(c * height + (h << 1) + 1) * width + (w << 1) + 1];
+				if(sum > 0) d_o[(c * height / 2 + h) * (width / 2) + w] = sum >> 2;
+			}
+		}
+	}
+}
+
+void linear_func(
+	int32_t* d_i, 
+	int8_t* weight, 
+	int32_t* bias, 
+	int32_t* output, 
+	int input_size, 
+	int output_size) {
+	
+	for (int i = 0; i < output_size; i++) {
+		output[i] = bias[i];
+		for (int j = 0; j < input_size; j++) {
+			output[i] += d_i[j] * weight[i * input_size + j];
+		}
+	}
+}
+
 void Prediction(int8_t image[28][28],
     int8_t w_conv1[6][3][3],
     int8_t w_conv2[16][6][3][3],
@@ -45,21 +113,22 @@ void Prediction(int8_t image[28][28],
 
     // Conv1 layer
     int32_t conv1_out[6][28][28] = { 0 };
-    for (int c = 0; c < 6; c++) {
-        for (int h = -1, h2=0; h < 27; h++, h2++) {
-            for (int w = -1, w2=0; w < 27; w++, w2++) {
-                for (int m = 0; m < 3; m++) {
-                    for (int n = 0; n < 3; n++) {
-                        int h_m = h + m;
-                        int w_n = w + n;
-                        if (h_m < 0 || w_n < 0 || h_m >= 28 || w_n >= 28) continue;
-                        conv1_out[c][h2][w2] += image[h_m][w_n] * w_conv1[c][m][n];
-                    }
-                }
-                conv1_out[c][h2][w2] += b_conv1[c];
-            }
-        }
-    }
+    conv_func(image, w_conv1, b_conv1, conv1_out, 0, 28, 28, 1, 1, 6, 3, 3);
+    // for (int c = 0; c < 6; c++) {
+    //     for (int h = -1, h2=0; h < 27; h++, h2++) {
+    //         for (int w = -1, w2=0; w < 27; w++, w2++) {
+    //             for (int m = 0; m < 3; m++) {
+    //                 for (int n = 0; n < 3; n++) {
+    //                     int h_m = h + m;
+    //                     int w_n = w + n;
+    //                     if (h_m < 0 || w_n < 0 || h_m >= 28 || w_n >= 28) continue;
+    //                     conv1_out[c][h2][w2] += image[h_m][w_n] * w_conv1[c][m][n];
+    //                 }
+    //             }
+    //             conv1_out[c][h2][w2] += b_conv1[c]; 
+    //         }
+    //     }
+    // }
 
 
     // ReLU
@@ -69,31 +138,33 @@ void Prediction(int8_t image[28][28],
 
     // Pool1
     int32_t pool1_out[6][14][14] = { 0 };
-    for (int c = 0; c < 6; c++) {
-        for (int h = 0; h < 14; h++) {
-            for (int w = 0; w < 14; w++) {
-                pool1_out[c][h][w] = (conv1_out[c][2*h][2*w] + conv1_out[c][2*h+1][2*w] + conv1_out[c][2*h][2*w+1] + conv1_out[c][2*h+1][2*w+1]);
-              if(pool1_out[c][h][w] > 0) pool1_out[c][h][w] = pool1_out[c][h][w] >> 2; //right shift 2 bits ~ divide by 4
-            }
-        }
-    }
+    pool_func(conv1_out, pool1_out, 6, 28, 28);
+    // for (int c = 0; c < 6; c++) {
+    //     for (int h = 0; h < 14; h++) {
+    //         for (int w = 0; w < 14; w++) {
+    //             pool1_out[c][h][w] = (conv1_out[c][2*h][2*w] + conv1_out[c][2*h+1][2*w] + conv1_out[c][2*h][2*w+1] + conv1_out[c][2*h+1][2*w+1]);
+    //           if(pool1_out[c][h][w] > 0) pool1_out[c][h][w] = pool1_out[c][h][w] >> 2; //right shift 2 bits ~ divide by 4
+    //         }
+    //     }
+    // }
 
     // Conv2 layer
     int32_t conv2_out[16][12][12] = { 0 };
-    for (int c = 0; c < 16; c++) {
-        for (int h = 0; h < 12; h++) {
-            for (int w = 0; w < 12; w++) {
-                for (int k = 0; k < 6; k++) {
-                    for (int m = 0; m < 3; m++) {
-                        for (int n = 0; n < 3; n++) {
-                            conv2_out[c][h][w] += pool1_out[k][h+m][w+n] * w_conv2[c][k][m][n];
-                        }
-                    }
-                }
-                conv2_out[c][h][w] += b_conv2[c];
-            }
-        }
-    }
+    conv_func(pool1_out, w_conv2, b_conv2, conv2_out, 2, 14, 14, 0, 6, 16, 3, 3);
+    // for (int c = 0; c < 16; c++) {
+    //     for (int h = 0; h < 12; h++) {
+    //         for (int w = 0; w < 12; w++) {
+    //             for (int k = 0; k < 6; k++) {
+    //                 for (int m = 0; m < 3; m++) {
+    //                     for (int n = 0; n < 3; n++) {
+    //                         conv2_out[c][h][w] += pool1_out[k][h+m][w+n] * w_conv2[c][k][m][n];
+    //                     }
+    //                 }
+    //             }
+    //             conv2_out[c][h][w] += b_conv2[c];
+    //         }
+    //     }
+    // }
         
     // ReLU
     for (int c = 0; c < 16; c++) {
@@ -102,15 +173,16 @@ void Prediction(int8_t image[28][28],
 
     // Pool2
     int32_t pool2_out[16][6][6] = { 0 };
-    for (int c = 0; c < 16; c++) {
-        for (int h = 0; h < 6; h++) {
-            for (int w = 0; w < 6; w++) {
-                pool2_out[c][h][w] = (conv2_out[c][2*h][2*w] + conv2_out[c][2*h+1][2*w] + conv2_out[c][2*h][2*w+1] + conv2_out[c][2*h+1][2*w+1]);
-                if(pool2_out[c][h][w] > 0)  
-                    pool2_out[c][h][w] = pool2_out[c][h][w] >> 2; //right shift 2 bits ~ divide by 4
-            }
-        }
-    }
+    pool_func(conv2_out, pool2_out, 16, 12, 12);
+    // for (int c = 0; c < 16; c++) {
+    //     for (int h = 0; h < 6; h++) {
+    //         for (int w = 0; w < 6; w++) {
+    //             pool2_out[c][h][w] = (conv2_out[c][2*h][2*w] + conv2_out[c][2*h+1][2*w] + conv2_out[c][2*h][2*w+1] + conv2_out[c][2*h+1][2*w+1]);
+    //             if(pool2_out[c][h][w] > 0)  
+    //                 pool2_out[c][h][w] = pool2_out[c][h][w] >> 2; //right shift 2 bits ~ divide by 4
+    //         }
+    //     }
+    // }
 
     // Flatten
     int32_t flat_out[576] = { 0 };
@@ -124,12 +196,13 @@ void Prediction(int8_t image[28][28],
 
     // FC1
     int32_t fc1_out[10] = { 0 };
-    for (int i = 0; i < 10; i++) {
-        for (int j = 0; j < 576; j++) {
-            fc1_out[i] += w_fc1[i][j] * flat_out[j];
-        }
-        fc1_out[i] += b_fc1[i];
-    }
+    linear_func(flat_out, w_fc1, b_fc1, fc1_out, 576, 10);
+    // for (int i = 0; i < 10; i++) {
+    //     for (int j = 0; j < 576; j++) {
+    //         fc1_out[i] += w_fc1[i][j] * flat_out[j];
+    //     }
+    //     fc1_out[i] += b_fc1[i];
+    // }
 
     // Softmax
     softmax(fc1_out, probs, 10);
@@ -239,7 +312,7 @@ int main(int argc, char** argv) {
         for (mm = 0; mm < 28; mm++){
             for (nn = 0; nn < 28; nn++){
                 image[mm][nn] = *(float*)&datain[28 * mm + nn];
-                image_int[mm][nn] = image[mm][nn] * 2;
+                image_int[mm][nn] = image[mm][nn] * 3;
             }
         }
 

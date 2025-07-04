@@ -70,7 +70,7 @@ int main(int argc, char** argv) {
     fclose(fp);
     
     fp = fopen("data/weights_int8/b_fc1.txt", "r");
-    for(i=0; i<120; i++) {
+    for(i=0; i<10; i++) {
         float temp;
         fscanf(fp, "%f ", &temp);
         b_fc1[i] = (int32_t)temp;
@@ -173,7 +173,7 @@ int main(int argc, char** argv) {
         for (mm = 0; mm < 28; mm++) {
             for (nn = 0; nn < 28; nn++) {
                 image[mm][nn] = *(float*)&datain[28 * mm + nn];
-                image_int[i][mm][nn] = image[mm][nn] * 2;
+                image_int[i][mm][nn] = image[mm][nn] * 3;
             }
         }
     }
@@ -182,7 +182,8 @@ int main(int argc, char** argv) {
     fprintf(fp, "#ifndef __TEST_IMAGE__H__\n");
     fprintf(fp, "#define __TEST_IMAGE__H__\n\n");
     fprintf(fp, "#include <stdint.h>\n\n");
-    fprintf(fp, "int8_t test_image[%d][28][28] = {\n", EXPORT_SIZE);
+    fprintf(fp, "#define TEST_IMAGE_SIZE %d\n\n", EXPORT_SIZE);
+    fprintf(fp, "int8_t test_image[TEST_IMAGE_SIZE][28][28] = {\n");
     for (i = 0; i < EXPORT_SIZE; i++) {
         fprintf(fp, "    {");
         for (mm = 0; mm < 28; mm++) {
@@ -198,7 +199,7 @@ int main(int argc, char** argv) {
         if (i < EXPORT_SIZE - 1) fprintf(fp, ",\n");
     }
     fprintf(fp, "\n};\n\n");
-    fprintf(fp, "int test_target[%d] = {", EXPORT_SIZE);
+    fprintf(fp, "int test_target[TEST_IMAGE_SIZE] = {");
     for (i = 0; i < EXPORT_SIZE; i++) {
         fprintf(fp, "%d", target[i]);
         if (i < EXPORT_SIZE - 1) fprintf(fp, ", ");
