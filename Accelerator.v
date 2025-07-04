@@ -43,8 +43,10 @@ module CNNAccelerator(
     reg [`STRIDE_WIDTH-1: 0]            conf_stride;
     reg [$clog2(`WEIGHT_SIZE)-1: 0]     conf_weight_num;
     reg [`KERNEL_WIDTH-1: 0]            conf_padding;
+    reg [3: 0]                          conf_padding_valid;
     reg [1: 0]                          conf_weight_size;
     reg [1: 0]                          conf_buf_size;
+    reg                                 conf_add_write;
     wire [`KERNEL_SIZE: 0] kernel_width_vec, kernel_height_vec;
     reg conf_refresh;
 // decode
@@ -70,10 +72,12 @@ module CNNAccelerator(
             conf_kernel_width   <= lacc_req_rk[0 +: `KERNEL_WIDTH];
             conf_kernel_height  <= lacc_req_rk[3 +: `KERNEL_WIDTH];
             conf_buf_width      <= lacc_req_rk[6 +: $clog2(`BUFFER_WIDTH)];
-            conf_buf_depth      <= lacc_req_rk[12 +: $clog2(`BUFFER_DEPTH)];
-            conf_stride         <= lacc_req_rk[18 +: `STRIDE_WIDTH];
-            conf_weight_num     <= lacc_req_rk[22 +: $clog2(`WEIGHT_SIZE)];
-            conf_padding        <= lacc_req_rk[24 +: `KERNEL_WIDTH];
+            conf_buf_depth      <= lacc_req_rk[11 +: $clog2(`BUFFER_DEPTH)];
+            conf_stride         <= lacc_req_rk[16 +: `STRIDE_WIDTH];
+            conf_weight_num     <= lacc_req_rk[18 +: $clog2(`WEIGHT_SIZE)];
+            conf_padding_valid  <= lacc_req_rk[21 +: 4];
+            conf_padding        <= lacc_req_rk[25 +: `KERNEL_WIDTH];
+            conf_add_write      <= lacc_req_rk[27];
             conf_weight_size    <= lacc_req_rk[28 +: 2];
             conf_buf_size       <= lacc_req_rk[30 +: 2];
         end
@@ -221,6 +225,7 @@ module CNNAccelerator(
         .buffer_depth_i(conf_buf_depth),
         .stride_i(conf_stride),
         .padding_i(conf_padding),
+        .padding_valid_i(conf_padding_valid),
         .buf_size_i(conf_buf_size),
         .req(buffer_req),
         .req_final(conv_exit),
@@ -314,34 +319,57 @@ module CNNAccelerator(
     wire [`WEIGHT_SIZE-1: 0] res_buf_valid;
     wire [`WEIGHT_SIZE-1: 0] res_buf_full;
     wire [`WEIGHT_SIZE*32-1: 0] res_buf_rdata;
+    wire [31: 0]                res_buf_rdata_sel;
     wire [`WEIGHT_SIZE*32-1: 0] res_buf_wdata;
     wire [`WEIGHT_SIZE-1: 0] res_buf_en;
     reg  [`WEIGHT_SIZE-1: 0] conf_res_buf_valid;
+    reg          res_buf_read;
+    reg          res_buf_wait;
+    reg  [31: 0] res_drsp_rdata;
+    wire [31: 0] nxt_res_drsp_rdata;
+
 
     Decoder #(`WEIGHT_SIZE) decoder_res_weight(res_weight_idx, res_weight_vec);
-    assign res_cmd_valid    = |(res_weight_vec & res_buf_valid);
+    assign res_cmd_valid    = (|(res_weight_vec & res_buf_valid)) & ~res_buf_wait;
     assign res_cmd_ready    = ~buffer_cmd_valid & lacc_data_ready;
     assign res_cmd_hsk      = res_cmd_valid & res_cmd_ready;
     assign res_cmd_addr     = conf_res_addr[res_weight_idx*32 +: 32];
-    assign res_cmd_wdata    = res_buf_rdata[res_weight_idx*32 +: 32];
+    assign res_buf_rdata_sel = res_buf_rdata[res_weight_idx*32 +: 32];
+    assign res_cmd_wdata    = conf_add_write ? res_drsp_rdata : res_buf_rdata_sel;
     assign res_buf_empty    = ~(|res_buf_valid);
     assign res_buf_stall    = |res_buf_full;
     assign res_cmd_addr_n4  = res_cmd_addr + 4;
     assign res_buf_en       = conf_res_buf_valid & (conv_valid | pool_valid);
 
     assign res_addr_widx = {WEIGHT_WIDTH{lacc_req_valid & op_conf_res}} & lacc_req_rk[WEIGHT_WIDTH-1:0] |
-                           {WEIGHT_WIDTH{res_cmd_hsk}} & res_weight_idx;
-    assign res_addr_we   = lacc_req_valid & op_conf_res | res_cmd_hsk;
+                           {WEIGHT_WIDTH{res_cmd_hsk & ~res_buf_read}} & res_weight_idx;
+    assign res_addr_we   = lacc_req_valid & op_conf_res | res_cmd_hsk & ~res_buf_read;
     assign res_addr_wdata = {32{lacc_req_valid & op_conf_res}} & lacc_req_rj |
                             {32{res_cmd_hsk}} & res_cmd_addr_n4;  
-    assign res_weight_en = res_cmd_hsk & conv_op;
+    assign res_weight_en = res_cmd_hsk & conv_op & ~res_buf_read;
+
+    wire res_drsp_rdata_en = res_buf_wait & lacc_drsp_valid;
+    assign nxt_res_drsp_rdata = lacc_drsp_rdata + res_buf_rdata_sel;
+
     always @(posedge clk)begin
         if(conf_refresh) conf_res_buf_valid <= (1 << (conf_weight_num+1)) - 1;
         if(res_addr_we) conf_res_addr[res_addr_widx*32 +: 32] <= res_addr_wdata;
+        if(res_drsp_rdata_en) res_drsp_rdata <= nxt_res_drsp_rdata;
         if(rst | idle_exit)begin
             res_weight_idx <= 0;
+            res_buf_read <= conf_add_write;
+            res_buf_wait <= 0;
         end
         else begin
+            if(res_cmd_valid & res_cmd_ready & conf_add_write)begin
+                res_buf_read <= ~res_buf_read;
+            end
+            if(res_cmd_hsk & res_buf_read)begin
+                res_buf_wait <= 1'b1;
+            end
+            if(res_buf_wait & lacc_drsp_valid)begin
+                res_buf_wait <= 1'b0;
+            end
             if(res_weight_en)begin
                 res_weight_idx <= res_weight_idx == conf_weight_num ? 0 : res_weight_idx + 1;
             end
@@ -386,7 +414,7 @@ generate
                         tdir <= ~tdir;
                     end
                 end
-                if(res_cmd_hsk & res_weight_vec[i])begin
+                if(res_cmd_hsk & res_weight_vec[i] & ~res_buf_read)begin
                     head <= head + 1;
                     if(&head)begin
                         hdir <= ~hdir;
@@ -406,7 +434,7 @@ endgenerate
     assign lacc_data_valid = weight_cmd_valid | buffer_cmd_valid | res_cmd_valid;
     assign lacc_data_addr = weight_cmd_valid ? weight_addr :
                             buffer_cmd_valid ? buffer_cmd_addr : res_cmd_addr;
-    assign lacc_data_read = ~(res_cmd_valid & ~buffer_cmd_valid);
+    assign lacc_data_read = ~(res_cmd_valid & ~buffer_cmd_valid & ~res_buf_read);
     assign lacc_data_wdata = res_cmd_wdata;
     assign lacc_data_size = 2'b10;
 
