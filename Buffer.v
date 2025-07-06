@@ -13,9 +13,11 @@ module CNNBuffer(
     input [`KERNEL_WIDTH-1: 0]          padding_i,
     input [3: 0]                        padding_valid_i,
     input [1: 0]                        buf_size_i,
+    input                               buf_refresh_i,
 
     input                               req,
     input                               req_final, // op finish
+    output                              req_next_line,
 
     output                              lacc_data_valid,
     input                               lacc_data_ready,
@@ -82,7 +84,7 @@ module CNNBuffer(
             cmd_valid_r <= 1'b0;
         end 
         else begin
-            if(idle_exit)begin
+            if(idle_exit & buf_refresh_i)begin
                 cmd_valid_r <= 1'b1;
             end
             else if(cmd_valid_last) begin
@@ -96,19 +98,21 @@ module CNNBuffer(
 // idx control
 
     wire idx_x_max = idx_x == buffer_width_i;
+    wire req_idx_x_max = req_idx_x == buffer_width_i;
+    assign req_next_line = req_idx_x_max;
 
     always @(posedge clk)begin
         if(rst | req)begin
             idx_x <= 0;
             vec_y <= 1;
-            last  <= 1'b0;
+            last  <= ~buf_refresh_i;
             req_idx_x <= 0;
             req_idx_y <= 0;
         end
         else begin
             if(cmd_hsk)begin
-                req_idx_x <= req_idx_x == buffer_width_i ? 0 : req_idx_x + 1;
-                if(req_idx_x == buffer_width_i)begin
+                req_idx_x <= req_idx_x_max ? 0 : req_idx_x + 1;
+                if(req_idx_x_max)begin
                     req_idx_y <= req_idx_y + 1;
                 end
             end
