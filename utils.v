@@ -58,3 +58,36 @@ module RDataGen(
 					{32{size[0]}} & {{16{half[15]}}, half} |
 					{32{~|size}} & {{24{byte_data[7]}}, byte_data};
 endmodule
+
+module SplitReg #(
+	parameter DATA_SIZE=1
+)(
+	input 					clk,
+	input 					req,
+	input [DATA_SIZE-1: 0] 	d_i,
+	input 					valid,
+	output [DATA_SIZE-1: 0] d_o
+);
+	reg [DATA_SIZE-1: 0] d;
+	reg [DATA_SIZE-1: 0] nxt_d;
+	reg d_valid;
+	reg nxt_d_valid;
+	wire nxt_en;
+	wire nxt_data_en;
+	wire en;
+	wire data_en;
+
+
+	assign en 			= req & ~d_valid | valid & ~nxt_d_valid;
+	assign data_en 		= req & ~d_valid;
+	assign nxt_data_en 	= req & d_valid;
+	assign nxt_en 		= nxt_data_en | valid & nxt_d_valid;
+
+	always @(posedge clk)begin
+		if(nxt_data_en) nxt_d 		<= d_i;
+		if(nxt_en) 		nxt_d_valid <= req;
+		if(data_en) 	d 			<= d_i;
+		if(en) 			d_valid 	<= req;
+	end
+	assign d_o = nxt_d_valid ? nxt_d : d;
+endmodule
