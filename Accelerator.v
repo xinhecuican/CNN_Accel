@@ -9,7 +9,7 @@ module CNNAccelerator(
     input                       lacc_flush,
 
     input                       lacc_req_valid,
-    input [`LACC_OP_WIDTH-1: 0] lacc_req_op,
+    input [`LACC_OP_WIDTH-1: 0] lacc_req_command,
     input [6: 0]                lacc_req_imm,
     input [31: 0]               lacc_req_rj,
     input [31: 0]               lacc_req_rk,
@@ -54,20 +54,27 @@ module CNNAccelerator(
     wire [`KERNEL_SIZE: 0] kernel_width_vec, kernel_height_vec;
     reg conf_refresh;
     reg buf_offset_valid, res_offset_valid;
+    reg conv_op;
+    reg pool_op;
+    reg act_op;
+    wire conv_empty;
+    wire pool_empty;
+    wire [1: 0] lacc_data_source;
+    wire        lacc_drsp_read;
 // decode
-    wire op_conf_buf;
-    wire op_conf_res;
-    wire op_conv;
-    wire op_conf_offset;
-    assign op_conf_buf      = lacc_req_op == 0;
-    assign op_conf_res      = lacc_req_op == 1;
-    assign op_conv          = lacc_req_op == 2;
-    assign op_conf_offset   = lacc_req_op == 3;
+    wire cmd_conf_buf;
+    wire cmd_conf_res;
+    wire cmd_conv;
+    wire cmd_conf_offset;
+    assign cmd_conf_buf      = lacc_req_command == 0;
+    assign cmd_conf_res      = lacc_req_command == 1;
+    assign cmd_conv          = lacc_req_command == 2;
+    assign cmd_conf_offset   = lacc_req_command == 3;
 
     reg [`WEIGHT_SIZE*32-1: 0] conf_res_addr;
 
     
-    wire conf_buf_valid = lacc_req_valid & op_conf_buf;
+    wire conf_buf_valid = lacc_req_valid & cmd_conf_buf;
 
     always @(posedge clk)begin
         conf_refresh <= conf_buf_valid;
@@ -86,7 +93,7 @@ module CNNAccelerator(
             conf_padding        <= lacc_req_rk[30 +: `KERNEL_WIDTH];
 
         end
-        if(lacc_req_valid & op_conf_offset)begin
+        if(lacc_req_valid & cmd_conf_offset)begin
             conf_buf_offset     <= lacc_req_rj[15: 0];
             conf_res_offset     <= lacc_req_rk[15: 0];
             conf_res_width      <= lacc_req_rk[16 +: $clog2(`BUFFER_WIDTH)];
@@ -95,7 +102,7 @@ module CNNAccelerator(
             buf_offset_valid <= 1'b0;
             res_offset_valid <= 1'b0;
         end
-        else if(lacc_req_valid & op_conf_offset)begin
+        else if(lacc_req_valid & cmd_conf_offset)begin
             buf_offset_valid <= |lacc_req_rj[15: 0];
             res_offset_valid <= |lacc_req_rk[15: 0];
         end
@@ -124,9 +131,10 @@ module CNNAccelerator(
     wire state_conv     = state_r == CONV;
 
     assign state_en = idle_exit | weight_exit | conv_exit;
-    assign idle_exit = state_idle & lacc_req_valid & op_conv;
+    assign idle_exit = state_idle & lacc_req_valid & cmd_conv;
     assign weight_exit = state_weight & weight_cmd_end & lacc_drsp_valid;
-    assign conv_exit = state_conv & window_finish & res_buf_empty;
+    assign conv_exit = state_conv & window_finish & res_buf_empty &
+                       (conv_op & conv_empty | pool_op & pool_empty);
     assign idle_state_n = lacc_req_imm[0] ? WEIGHT : CONV;
     assign nxt_state = {FSM_WIDTH{idle_exit}} & idle_state_n |
                        {FSM_WIDTH{weight_exit}} & CONV |
@@ -265,9 +273,6 @@ module CNNAccelerator(
     );
 
 // conv
-    reg conv_op;
-    reg pool_op;
-    reg act_op;
     wire [`WEIGHT_SIZE*32-1: 0] conv_data;
     wire [`WEIGHT_SIZE-1: 0] conv_valid;
     wire res_buf_stall;
@@ -293,11 +298,15 @@ module CNNAccelerator(
         .weight(weight_buf),
         .conv_data(conv_data),
         .conv_valid(conv_valid),
+        .conv_empty(conv_empty),
         .window_stall(window_stall_conv),
         .stall(res_buf_stall)
     );
 
     assign pool_window_valid = window_valid & pool_op;
+    always @(posedge clk)begin
+        if(idle_exit) pool_mode <= lacc_req_rj[0 +: `POOL_MODE_WIDTH];
+    end
     CNNPool pool(
         .clk(clk),
         .rst(rst),
@@ -310,7 +319,8 @@ module CNNAccelerator(
         .window(window),
         .window_stall(window_stall_pool),
         .pool_data(pool_data),
-        .pool_valid(pool_valid)
+        .pool_valid(pool_valid),
+        .pool_empty(pool_empty)
     );
 
     assign window_stall = window_stall_conv | window_stall_pool;
@@ -321,7 +331,7 @@ module CNNAccelerator(
             pool_op <= 0;
             act_op  <= 0;
         end
-        else if(lacc_req_valid & op_conv)begin
+        else if(lacc_req_valid & cmd_conv)begin
             conv_op <= lacc_req_imm[0];
             pool_op <= lacc_req_imm[1];
             act_op  <= lacc_req_imm[2];
@@ -347,68 +357,71 @@ module CNNAccelerator(
     wire [`WEIGHT_SIZE-1: 0] res_buf_full;
     wire [`WEIGHT_SIZE*32-1: 0] res_buf_rdata;
     wire [31: 0]                res_buf_rdata_sel;
+    wire [31: 0]                res_buf_raddr_sel;
     wire [`WEIGHT_SIZE*32-1: 0] res_buf_wdata;
     wire [`WEIGHT_SIZE-1: 0] res_buf_en;
     reg  [`WEIGHT_SIZE-1: 0] conf_res_buf_valid;
-    reg          res_buf_read;
-    reg          res_buf_wait;
-    reg  [31: 0] res_drsp_rdata;
-    wire [31: 0] nxt_res_drsp_rdata;
+    wire         res_buf_read_req;
+    wire         res_buf_write_req;
+    wire [31: 0] res_buf_awrite_addr;
+    wire [31: 0] res_buf_awrite_data;
+    wire         res_buf_awrite_req;
+    wire  [31: 0] res_buf_awrite_addr_n;
+    wire  [31: 0] res_buf_awrite_data_n;
+    wire [31: 0] nxt_res_buf_awrite_data;
     wire [31: 0] nxt_res_drsp_add_data;
     wire [31: 0] nxt_res_drsp_rdata_relu;
     parameter RES_IDX_W = $clog2(`BUFFER_WIDTH);
     reg [`WEIGHT_SIZE*RES_IDX_W-1: 0] res_buf_idx;
     wire [RES_IDX_W-1: 0] res_buf_idx_n;
 
+    assign res_buf_read_req = (|(res_weight_vec & res_buf_valid)) & conf_add_write;
+    assign res_buf_write_req = (|(res_weight_vec & res_buf_valid)) & ~conf_add_write |
+                                res_buf_awrite_req;
+
+    wire res_buf_addr_valid;
+    SplitReg #(64) split_res_buf_addr(clk, conf_add_write & res_cmd_hsk & ~res_buf_awrite_req, {res_buf_rdata_sel, res_buf_raddr_sel}, res_buf_addr_valid,
+                                        res_drsp_rdata_en, {res_buf_awrite_data, res_buf_awrite_addr});
+    SplitReg #(64) split_awrite_info(clk, res_drsp_rdata_en, {nxt_res_buf_awrite_data, res_buf_awrite_addr}, res_buf_awrite_req,
+                                        res_cmd_hsk & res_buf_awrite_req, {res_buf_awrite_data_n, res_buf_awrite_addr_n});
 
     Decoder #(`WEIGHT_SIZE) decoder_res_weight(res_weight_idx, res_weight_vec);
-    assign res_cmd_valid    = (|(res_weight_vec & res_buf_valid)) & ~res_buf_wait;
+    assign res_cmd_valid    = res_buf_read_req | res_buf_write_req;
     assign res_cmd_ready    = ~buffer_cmd_valid & lacc_data_ready;
     assign res_cmd_hsk      = res_cmd_valid & res_cmd_ready;
-    assign res_cmd_addr     = conf_res_addr[res_weight_idx*32 +: 32];
+    assign res_cmd_addr     = res_buf_awrite_req ? res_buf_awrite_addr_n : res_buf_raddr_sel;
     assign res_buf_rdata_sel = res_buf_rdata[res_weight_idx*32 +: 32];
-    assign res_cmd_wdata    = conf_add_write ? res_drsp_rdata : res_buf_rdata_sel;
-    assign res_buf_empty    = ~(|res_buf_valid);
+    assign res_buf_raddr_sel = conf_res_addr[res_weight_idx*32 +: 32];
+    assign res_cmd_wdata    = res_buf_awrite_req ? res_buf_awrite_data_n : res_buf_rdata_sel;
+    assign res_buf_empty    = ~(|res_buf_valid) & ~res_buf_addr_valid & ~res_buf_awrite_req;
     assign res_buf_stall    = |res_buf_full;
     wire   res_buf_idx_max  = (res_buf_idx[res_weight_idx*RES_IDX_W +: RES_IDX_W] == conf_res_width);
-    assign res_cmd_addr_cin = res_buf_idx_max & res_offset_valid ? conf_res_offset : 4;
+    assign res_cmd_addr_cin = res_buf_idx_max & res_offset_valid ? conf_res_offset + 4 : 4;
     assign res_cmd_addr_n4  = res_cmd_addr + res_cmd_addr_cin;
     assign res_buf_idx_n    = res_buf_idx[res_weight_idx*RES_IDX_W +: RES_IDX_W] + 1;
     assign res_buf_en       = conf_res_buf_valid & (conv_valid | pool_valid);
 
-    assign res_addr_widx = {WEIGHT_WIDTH{lacc_req_valid & op_conf_res}} & lacc_req_rk[WEIGHT_WIDTH-1:0] |
-                           {WEIGHT_WIDTH{res_cmd_hsk & ~res_buf_read}} & res_weight_idx;
-    assign res_addr_we   = lacc_req_valid & op_conf_res | res_cmd_hsk & ~res_buf_read;
-    assign res_addr_wdata = {32{lacc_req_valid & op_conf_res}} & lacc_req_rj |
+    assign res_addr_widx = {WEIGHT_WIDTH{lacc_req_valid & cmd_conf_res}} & lacc_req_rk[WEIGHT_WIDTH-1:0] |
+                           {WEIGHT_WIDTH{res_cmd_hsk}} & res_weight_idx;
+    assign res_addr_we   = lacc_req_valid & cmd_conf_res | res_cmd_hsk & ~res_buf_awrite_req;
+    assign res_addr_wdata = {32{lacc_req_valid & cmd_conf_res}} & lacc_req_rj |
                             {32{res_cmd_hsk}} & res_cmd_addr_n4;  
-    assign res_weight_en = res_cmd_hsk & conv_op & ~res_buf_read;
+    assign res_weight_en = res_cmd_hsk & (pool_op | conv_op) & ~res_buf_awrite_req;
 
-    wire res_drsp_rdata_en = res_buf_wait & lacc_drsp_valid;
-    assign nxt_res_drsp_add_data = lacc_drsp_rdata + res_buf_rdata_sel;
-    assign nxt_res_drsp_rdata = act_op ? nxt_res_drsp_rdata_relu : nxt_res_drsp_add_data;
+    wire res_drsp_rdata_en = lacc_drsp_valid & lacc_data_source[1] & lacc_drsp_read;
+    assign nxt_res_drsp_add_data = lacc_drsp_rdata + res_buf_awrite_data;
+    assign nxt_res_buf_awrite_data = act_op ? nxt_res_drsp_rdata_relu : nxt_res_drsp_add_data;
 
     Relu resp_buf_relu (nxt_res_drsp_add_data, nxt_res_drsp_rdata_relu);
 
     always @(posedge clk)begin
         if(conf_refresh) conf_res_buf_valid <= (1 << (conf_weight_num+1)) - 1;
         if(res_addr_we) conf_res_addr[res_addr_widx*32 +: 32] <= res_addr_wdata;
-        if(res_drsp_rdata_en) res_drsp_rdata <= nxt_res_drsp_rdata;
         if(rst | idle_exit)begin
             res_weight_idx <= 0;
-            res_buf_read <= conf_add_write;
-            res_buf_wait <= 0;
             res_buf_idx <= 0;
         end
         else begin
-            if(res_cmd_valid & res_cmd_ready & conf_add_write)begin
-                res_buf_read <= ~res_buf_read;
-            end
-            if(res_cmd_hsk & res_buf_read)begin
-                res_buf_wait <= 1'b1;
-            end
-            if(res_buf_wait & lacc_drsp_valid)begin
-                res_buf_wait <= 1'b0;
-            end
             if(res_weight_en)begin
                 res_weight_idx <= res_weight_idx == conf_weight_num ? 0 : res_weight_idx + 1;
                 res_buf_idx[res_weight_idx*RES_IDX_W +: RES_IDX_W] <= res_buf_idx_max ? 0 : res_buf_idx_n;
@@ -418,7 +431,7 @@ module CNNAccelerator(
 
     genvar i;
 generate
-    for(genvar i=0; i<`WEIGHT_SIZE; i=i+1)begin : gen_res_buf
+    for(i=0; i<`WEIGHT_SIZE; i=i+1)begin : gen_res_buf
         reg [`RES_BUF_SIZE*32-1: 0] res_buf;
         reg [$clog2(`RES_BUF_SIZE)-1: 0] head, tail;
         reg hdir, tdir;
@@ -454,7 +467,7 @@ generate
                         tdir <= ~tdir;
                     end
                 end
-                if(res_cmd_hsk & res_weight_vec[i] & ~res_buf_read)begin
+                if(res_cmd_hsk & res_weight_vec[i] & ~res_buf_awrite_req)begin
                     head <= head + 1;
                     if(&head)begin
                         hdir <= ~hdir;
@@ -468,14 +481,21 @@ endgenerate
     always @(posedge clk)begin
         data_req_buf <= buffer_cmd_valid;
     end
-    assign lacc_rsp_valid = op_conf_buf | conv_exit | op_conf_res | op_conf_offset;
+    assign lacc_rsp_valid = cmd_conf_buf | conv_exit | cmd_conf_res | cmd_conf_offset;
     assign lacc_rsp_rdat  = 0;
 
     assign lacc_data_valid = weight_cmd_valid | buffer_cmd_valid | res_cmd_valid;
     assign lacc_data_addr = weight_cmd_valid ? weight_addr :
                             buffer_cmd_valid ? buffer_cmd_addr : res_cmd_addr;
-    assign lacc_data_read = ~(res_cmd_valid & ~buffer_cmd_valid & ~res_buf_read);
+    assign lacc_data_read = ~(res_cmd_valid & ~buffer_cmd_valid & (~conf_add_write | res_buf_awrite_req));
     assign lacc_data_wdata = res_cmd_wdata;
     assign lacc_data_size = buffer_cmd_valid ? buffer_cmd_size : 2'b10;
+
+    wire lacc_source_valid, drsp_read_valid;
+    SplitReg #(2) split_lacc_source(clk, lacc_data_valid & lacc_data_ready, {res_cmd_valid & ~buffer_cmd_valid, buffer_cmd_valid}, lacc_source_valid,
+                                         lacc_drsp_valid, lacc_data_source);
+    SplitReg #(1) split_drsp_read(clk, lacc_data_valid & lacc_data_ready, lacc_data_read, drsp_read_valid,
+                                        lacc_drsp_valid, lacc_drsp_read);
+
 
 endmodule

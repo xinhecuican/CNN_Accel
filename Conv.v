@@ -14,7 +14,8 @@ module CNNConv (
     input [`WINDOW_SIZE*32-1: 0]        window,
     output                              window_stall,
     output [`WEIGHT_SIZE*32-1: 0]       conv_data,
-    output [`WEIGHT_SIZE-1: 0]          conv_valid
+    output [`WEIGHT_SIZE-1: 0]          conv_valid,
+    output                              conv_empty
 );
 
     reg [`WINDOW_SIZE+`WEIGHT_SIZE-1: 0]    conv_valid_r;
@@ -47,6 +48,7 @@ module CNNConv (
 
     assign res       = res_r[conv_valid_idx*`WEIGHT_SIZE*32 +: `WEIGHT_SIZE*32];
     assign conv_data = act_valid ? relu_o : res;
+    assign conv_empty = ~(|conv_valid_r);
 
     genvar i, j;
 generate
