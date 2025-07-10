@@ -72,6 +72,7 @@ module CNNAccelerator(
     assign cmd_conf_offset   = lacc_req_command == 3;
 
     reg [`WEIGHT_SIZE*32-1: 0] conf_res_addr;
+    reg [`WEIGHT_SIZE*32-1: 0] conf_bias;
 
     
     wire conf_buf_valid = lacc_req_valid & cmd_conf_buf;
@@ -290,6 +291,7 @@ module CNNAccelerator(
         .clk(clk),
         .rst(rst),
         .act_valid(conv_act_valid),
+        .bias(conf_bias),
         .conf_refresh(conf_refresh),
         .kernel_height(kernel_height_vec[`KERNEL_SIZE: 1]),
         .kernel_width(kernel_width_vec[`KERNEL_SIZE: 1]),
@@ -403,7 +405,7 @@ module CNNAccelerator(
 
     assign res_addr_widx = {WEIGHT_WIDTH{lacc_req_valid & cmd_conf_res}} & lacc_req_rk[WEIGHT_WIDTH-1:0] |
                            {WEIGHT_WIDTH{res_cmd_hsk}} & res_weight_idx;
-    assign res_addr_we   = lacc_req_valid & cmd_conf_res | res_cmd_hsk & ~res_buf_awrite_req;
+    assign res_addr_we   = lacc_req_valid & cmd_conf_res & lacc_req_imm[0] | res_cmd_hsk & ~res_buf_awrite_req;
     assign res_addr_wdata = {32{lacc_req_valid & cmd_conf_res}} & lacc_req_rj |
                             {32{res_cmd_hsk}} & res_cmd_addr_n4;  
     assign res_weight_en = res_cmd_hsk & (pool_op | conv_op) & ~res_buf_awrite_req;
@@ -426,6 +428,12 @@ module CNNAccelerator(
                 res_weight_idx <= res_weight_idx == conf_weight_num ? 0 : res_weight_idx + 1;
                 res_buf_idx[res_weight_idx*RES_IDX_W +: RES_IDX_W] <= res_buf_idx_max ? 0 : res_buf_idx_n;
             end
+        end
+        if(rst)begin
+            conf_bias <= 0;
+        end
+        else if(lacc_req_valid & cmd_conf_res & (|lacc_req_imm[2: 1])) begin
+            conf_bias[res_addr_widx*32 +: 32] <= {32{~lacc_req_imm[2]}} & lacc_req_rj;
         end
     end
 

@@ -6,6 +6,7 @@ module CNNConv (
     input stall,
     input [`WEIGHT_SIZE*`WINDOW_SIZE*32-1: 0] weight,
     input                               act_valid,
+    input [`WEIGHT_SIZE*32-1: 0]        bias,
     input                               conf_refresh,
     input [`KERNEL_SIZE-1: 0]           kernel_height,
     input [`KERNEL_SIZE-1: 0]           kernel_width,
@@ -46,7 +47,6 @@ module CNNConv (
         end
     end
 
-    assign res       = res_r[conv_valid_idx*`WEIGHT_SIZE*32 +: `WEIGHT_SIZE*32];
     assign conv_data = act_valid ? relu_o : res;
     assign conv_empty = ~(|conv_valid_r);
 
@@ -54,6 +54,7 @@ module CNNConv (
 generate
     for(i=0; i<`WEIGHT_SIZE; i=i+1)begin
         assign conv_valid[i] = conv_valid_r[conv_valid_idx+1+i];
+        assign res[i*32 +: 32] = $signed(res_r[(conv_valid_idx*`WEIGHT_SIZE+i)*32 +: 32]) + $signed(bias[i*32 +: 32]);
         Relu relu(res[i*32 +: 32], relu_o[i*32 +: 32]);
     end
     for(i=0; i<`WINDOW_SIZE; i=i+1)begin
