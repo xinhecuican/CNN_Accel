@@ -180,7 +180,7 @@ module CNNBuffer(
 
     genvar i, j;
 generate
-    for(i=0; i<4; i++)begin
+    for(i=0; i<4; i=i+1)begin
         assign drsp_ridx[i*2 +: 2] = i - idx_x[1: 0];
         wire [$clog2(`BUFFER_WIDTH)-1: 0] widx;
         assign widx = idx_x + i;
@@ -207,6 +207,8 @@ endgenerate
     wire [`KERNEL_SIZE-1: 0]        window_col;
     reg [$clog2(`BUFFER_WIDTH): 0] buffer_width_max;
     reg kernel_next_line;
+    reg [1: 0] data_offset;
+    wire [2: 0] kernel_idx_x_cin;
 
     wire [`KERNEL_WIDTH-1: 0] kernel_fill_all_idx;
     assign kernel_fill_all_idx = kernel_width_i - 1;
@@ -223,8 +225,7 @@ endgenerate
     assign padding_expand = padding_i;
     assign padding_sub = {$clog2(`BUFFER_WIDTH)+1{padding_valid_i[0]}} & ((~padding_expand) + 1);
 
-    reg [1: 0] data_offset;
-    wire [2: 0] kernel_idx_x_cin;
+
     assign data_cin         = {buf_size_i[1], buf_size_i[0], ~(|buf_size_i)};
     assign kernel_idx_x_cin = kernel_padding_x_ov ? 1 : data_cin;
 
