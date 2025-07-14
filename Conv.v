@@ -23,24 +23,15 @@ module CNNConv (
     reg [`WINDOW_SIZE*`WEIGHT_SIZE*32-1: 0] res_r;
     wire [`WEIGHT_SIZE*32-1: 0]             res, relu_o;
     parameter CVW = $clog2(`WINDOW_SIZE+`WEIGHT_SIZE);
-    reg [CVW-1: 0] conv_valid_idx;
-    wire [CVW-1: 0] conv_valid_idx_n;
 
     wire stall_all      = (|conv_valid) & stall;
     assign window_stall = stall_all;
 
-    assign conv_valid_idx_n = {CVW{kernel_height[1] & kernel_width[1]}} & 'd4 |
-                              {CVW{kernel_height[2] & kernel_width[2]}} & 'd8;
-
     always @(posedge clk)begin
         if(rst)begin
             conv_valid_r <= 0;
-            conv_valid_idx <= 0;
         end
         else begin
-            if(conf_refresh)begin
-                conv_valid_idx <= conv_valid_idx_n;
-            end
             if(!stall_all)begin
                 conv_valid_r <= {conv_valid_r[`WINDOW_SIZE+`WEIGHT_SIZE-2: 0], window_valid};
             end
@@ -49,12 +40,15 @@ module CNNConv (
 
     assign conv_data = act_valid ? relu_o : res;
     assign conv_empty = ~(|conv_valid_r);
+    // only support 2x2 and 3x3
+    assign res = kernel_height[1] & kernel_width[1] ? res_r[4*`WEIGHT_SIZE*32 +: 32*`WEIGHT_SIZE] :
+                                                      res_r[8*`WEIGHT_SIZE*32 +: 32*`WEIGHT_SIZE];
+    assign conv_valid = kernel_height[1] & kernel_width[1] ? conv_valid_r[5 +: `WEIGHT_SIZE] :
+                                                              conv_valid_r[9 +: `WEIGHT_SIZE];
 
     genvar i, j;
 generate
     for(i=0; i<`WEIGHT_SIZE; i=i+1)begin
-        assign conv_valid[i] = conv_valid_r[conv_valid_idx+1+i];
-        assign res[i*32 +: 32] = $signed(res_r[(conv_valid_idx*`WEIGHT_SIZE+i)*32 +: 32]) + $signed(bias[i*32 +: 32]);
         Relu relu(res[i*32 +: 32], relu_o[i*32 +: 32]);
     end
     for(i=0; i<`WINDOW_SIZE; i=i+1)begin
@@ -83,7 +77,7 @@ generate
         for(j=0; j<`WEIGHT_SIZE; j=j+1)begin
             wire [31: 0] d_conv, d_i;
             if(i == 0)begin
-                assign d_conv = 0;
+                assign d_conv = bias[j*32 +: 32];
             end
             else begin
                 assign d_conv = res_r[((i-1)*`WEIGHT_SIZE+j)*32 +: 32];
@@ -96,7 +90,7 @@ generate
             end
 
             wire [31: 0] res;
-            ConvPE #(i) pe (
+            ConvPE #(1) pe (
                 .d_conv(d_conv),
                 .d(d_i),
                 .w(weight[(j*`WINDOW_SIZE+i)*32 +: 32]),

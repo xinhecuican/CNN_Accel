@@ -169,6 +169,7 @@ module CNNBuffer(
     wire [`BUFFER_WIDTH*4-1: 0] buf_wvecs;
     wire [`BUFFER_WIDTH-1: 0] buf_wvec;
     wire [31: 0] drsp_rdata_sft;
+    wire [31: 0] drsp_wdata_normal;
     wire [4: 0]  drsp_sfamt;
 
     assign buf_wvec = buf_wvecs[`BUFFER_WIDTH-1: 0] |
@@ -182,18 +183,20 @@ module CNNBuffer(
 generate
     for(i=0; i<4; i=i+1)begin
         assign drsp_ridx[i*2 +: 2] = i - idx_x[1: 0];
+        wire [1: 0] sel_idx = drsp_ridx[i*2 +: 2];
+        assign drsp_wdata_normal[i*8 +: 8] = drsp_rdata_sft[sel_idx * 8 +: 8];
         wire [$clog2(`BUFFER_WIDTH)-1: 0] widx;
         assign widx = idx_x + i;
         Decoder #(`BUFFER_WIDTH) decoder_widx (widx, buf_wvecs[i*`BUFFER_WIDTH +: `BUFFER_WIDTH]);
     end
     for(i=0; i<`BUFFER_DEPTH; i=i+1)begin : gen_buffer
-        reg [8*`BUFFER_WIDTH-1: 0] buffer_row;
-        assign rdata[i*32 +: 32] = buffer_row[kernel_idx_x[$clog2(`BUFFER_WIDTH)-1: 2]*32 +: 32];
-        for(j=0; j<`BUFFER_WIDTH; j=j+1)begin
-            wire [1: 0] sel_idx = drsp_ridx[(j%4)*2 +: 2];
+        reg [31: 0] buffer_row [`BUFFER_WIDTH/4-1: 0];
+        assign rdata[i*32 +: 32] = buffer_row[kernel_idx_x[$clog2(`BUFFER_WIDTH)-1: 2]];
+        for(j=0; j<`BUFFER_WIDTH/4; j=j+1)begin
+            wire [31: 0] buf_wmask = {{8{buf_wvec[j*4+3]}}, {8{buf_wvec[j*4+2]}}, {8{buf_wvec[j*4+1]}}, {8{buf_wvec[j*4]}}};
             always @(posedge clk)begin
-                if(lacc_drsp_valid & vec_y[i] & buf_wvec[j])begin
-                    buffer_row[j*8 +: 8] <= drsp_rdata_sft[sel_idx * 8 +: 8];
+                if(lacc_drsp_valid & vec_y[i] & (|buf_wvec[j*4 +: 4]))begin
+                    buffer_row[j] <= drsp_wdata_normal & buf_wmask;
                 end
             end
         end
@@ -279,17 +282,20 @@ endgenerate
 
 generate
     for(i=0; i<`KERNEL_SIZE; i=i+1)begin : gen_window
+        wire [31: 0] window_rdata_in, window_wdata_v;
+        RDataGen data_gen(buf_size_i, data_offset, window_rdata[i*32 +: 32], window_rdata_in);
+        assign window_wdata_v = {32{~kernel_padding_x_ov & ~kernel_row_ov[i]}} & window_rdata_in;
         for(j=0; j<`KERNEL_SIZE; j=j+1)begin : gen_window_row
             wire window_fill_en = kernel_data_req & (kernel_fill_all | ~kernel_fill_all & window_col[j]) | req;
             wire [31: 0] window_wdata;
-            wire [31: 0] window_rdata_in;
+
             wire [$clog2(`WINDOW_SIZE)-1: 0] shift_idx;
             
-            RDataGen data_gen(buf_size_i, data_offset, window_rdata[i*32 +: 32], window_rdata_in);
+
             assign shift_idx = i * `KERNEL_SIZE + j + stride_i;
             assign window_wdata = ~kernel_height_mask[i] | ~kernel_width_mask[j] | req ? 0 :
                                   kernel_fill_all & ~window_col[j] ? window_r[shift_idx*32 +: 32] : 
-                                {32{~kernel_padding_x_ov & ~kernel_row_ov[i]}} & window_rdata_in;
+                                                                    window_wdata_v;
 
             always @(posedge clk)begin
                 if(window_fill_en) window_r[(i * `KERNEL_SIZE + j)*32 +: 32] <= window_wdata;
