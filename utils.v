@@ -63,6 +63,7 @@ module SplitReg #(
     parameter DATA_SIZE=1
 )(
     input                     clk,
+    input                     rst,
     input                     req,
     input [DATA_SIZE-1: 0]     d_i,
     output                     valid,
@@ -85,10 +86,16 @@ module SplitReg #(
     assign nxt_en       = req & ~ready & d_valid | ready & ~req & nxt_d_valid;
 
     always @(posedge clk)begin
+        if(rst)begin
+            nxt_d_valid <= 0;
+            d_valid     <= 0;
+        end
+        else begin
+            if(en) d_valid          <= req;
+            if(nxt_en) nxt_d_valid  <= req;
+        end
         if(nxt_data_en) nxt_d       <= d_i;
-        if(nxt_en)      nxt_d_valid <= req;
         if(data_en)     d           <= d_i;
-        if(en)          d_valid     <= req;
     end
     assign valid = d_valid | nxt_d_valid;
     assign d_o = nxt_d_valid ? nxt_d : d;

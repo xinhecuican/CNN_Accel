@@ -82,9 +82,14 @@ module CNNAccelerator(
 
     always @(posedge clk)begin
         conf_refresh <= conf_buf_valid;
+        if(rst)begin
+            conf_add_write <= 0;
+        end
+        else if(conf_buf_valid)begin
+            conf_add_write      <= lacc_req_rk[1];
+        end
         if(conf_buf_valid)begin
             conf_buf_refresh    <= lacc_req_rk[0];
-            conf_add_write      <= lacc_req_rk[1];
             conf_padding_valid  <= lacc_req_rk[2 +: 4];
             conf_weight_size    <= lacc_req_rk[6 +: 2];
             conf_buf_size       <= lacc_req_rk[8 +: 2];
@@ -295,7 +300,7 @@ generate
     for(i=0; i<`WEIGHT_SIZE*`WINDOW_SIZE; i=i+1)begin
         assign weight_buf_w[i*32 +: 32] = weight_buf_r[i];
     end
-    for(i=0; i<`WEIGHT_SIZE; i++)begin
+    for(i=0; i<`WEIGHT_SIZE; i=i+1)begin
         assign conf_bias_w[i*32 +: 32] = conf_bias[i];
     end
 endgenerate
@@ -395,9 +400,9 @@ endgenerate
 
     wire res_buf_addr_valid;
     wire res_drsp_rdata_en = lacc_drsp_valid & lacc_data_source[1] & lacc_drsp_read;
-    SplitReg #(64) split_res_buf_addr(clk, conf_add_write & res_cmd_hsk & ~res_buf_awrite_req, {res_buf_rdata_sel, res_buf_raddr_sel}, res_buf_addr_valid,
+    SplitReg #(64) split_res_buf_addr(clk, rst, conf_add_write & res_cmd_hsk & ~res_buf_awrite_req, {res_buf_rdata_sel, res_buf_raddr_sel}, res_buf_addr_valid,
                                         res_drsp_rdata_en, {res_buf_awrite_data, res_buf_awrite_addr});
-    SplitReg #(64) split_awrite_info(clk, res_drsp_rdata_en, {nxt_res_buf_awrite_data, res_buf_awrite_addr}, res_buf_awrite_req,
+    SplitReg #(64) split_awrite_info(clk, rst, res_drsp_rdata_en, {nxt_res_buf_awrite_data, res_buf_awrite_addr}, res_buf_awrite_req,
                                         res_cmd_hsk & res_buf_awrite_req, {res_buf_awrite_data_n, res_buf_awrite_addr_n});
 
     Decoder #(`WEIGHT_SIZE) decoder_res_weight(res_weight_idx, res_weight_vec);
@@ -508,9 +513,9 @@ endgenerate
     assign lacc_data_size = buffer_cmd_valid ? buffer_cmd_size : 2'b10;
 
     wire lacc_source_valid, drsp_read_valid;
-    SplitReg #(2) split_lacc_source(clk, lacc_data_valid & lacc_data_ready, {res_cmd_valid & ~buffer_cmd_valid, buffer_cmd_valid}, lacc_source_valid,
+    SplitReg #(2) split_lacc_source(clk, rst, lacc_data_valid & lacc_data_ready, {res_cmd_valid & ~buffer_cmd_valid, buffer_cmd_valid}, lacc_source_valid,
                                          lacc_drsp_valid, lacc_data_source);
-    SplitReg #(1) split_drsp_read(clk, lacc_data_valid & lacc_data_ready, lacc_data_read, drsp_read_valid,
+    SplitReg #(1) split_drsp_read(clk, rst, lacc_data_valid & lacc_data_ready, lacc_data_read, drsp_read_valid,
                                         lacc_drsp_valid, lacc_drsp_read);
 
 

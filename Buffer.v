@@ -50,7 +50,7 @@ module CNNBuffer(
     wire                                kernel_data_req;
     wire                                kernel_idx_x_max;
     wire                                kernel_padding_x_ov;
-    wire [`KERNEL_SIZE*32-1: 0]         window_rdata;
+    wire [31: 0]         window_rdata [`KERNEL_SIZE-1: 0];
     wire [2: 0]                         data_cin;
 // state control
     parameter FSM_WIDTH = 1;
@@ -132,8 +132,8 @@ module CNNBuffer(
                           {32{cmd_hsk}} & nxt_req_addr;
     assign lacc_data_addr = buf_addr;
     wire data_size_valid, data_offset_valid;
-    SplitReg #(2) split_data_size(clk, cmd_hsk, lacc_data_size, data_size_valid, lacc_drsp_valid, buf_data_size);
-    SplitReg #(2) split_data_offset(clk, cmd_hsk, lacc_data_addr[1: 0], data_offset_valid, lacc_drsp_valid, buf_data_offset);
+    SplitReg #(2) split_data_size(clk, rst, cmd_hsk, lacc_data_size, data_size_valid, lacc_drsp_valid, buf_data_size);
+    SplitReg #(2) split_data_offset(clk, rst, cmd_hsk, lacc_data_addr[1: 0], data_offset_valid, lacc_drsp_valid, buf_data_offset);
     assign idx_x_cin = {buf_data_size[1], buf_data_size[0], ~(|buf_data_size)};
 
     always @(posedge clk)begin
@@ -164,7 +164,7 @@ module CNNBuffer(
     end
 
 // buffer control
-    wire [`BUFFER_DEPTH*32-1: 0] rdata;
+    wire [31: 0] rdata [`BUFFER_DEPTH-1: 0];
     wire [4*2-1: 0] drsp_ridx;
     wire [`BUFFER_WIDTH*4-1: 0] buf_wvecs;
     wire [`BUFFER_WIDTH-1: 0] buf_wvec;
@@ -191,7 +191,7 @@ generate
     end
     for(i=0; i<`BUFFER_DEPTH; i=i+1)begin : gen_buffer
         reg [31: 0] buffer_row [`BUFFER_WIDTH/4-1: 0];
-        assign rdata[i*32 +: 32] = buffer_row[kernel_idx_x[$clog2(`BUFFER_WIDTH)-1: 2]];
+        assign rdata[i] = buffer_row[kernel_idx_x[$clog2(`BUFFER_WIDTH)-1: 2]];
         for(j=0; j<`BUFFER_WIDTH/4; j=j+1)begin
             wire [31: 0] buf_wmask = {{8{buf_wvec[j*4+3]}}, {8{buf_wvec[j*4+2]}}, {8{buf_wvec[j*4+1]}}, {8{buf_wvec[j*4]}}};
             always @(posedge clk)begin
@@ -266,12 +266,13 @@ generate
         wire [$clog2(`BUFFER_DEPTH)-1: 0] window_ridx_valid;
         assign window_ridx_valid        = window_ridx[$clog2(`BUFFER_DEPTH)-1: 0];
         assign kernel_row_ov[i]         = window_ridx > buffer_depth_i;
-        assign window_rdata[i*32 +: 32] = rdata[window_ridx_valid*32 +: 32];
+        assign window_rdata[i] = rdata[window_ridx_valid];
     end
 endgenerate
 
 
-    reg [`WINDOW_SIZE*32-1: 0]      window_r;
+    reg [31: 0]      window_r [`WINDOW_SIZE-1: 0];
+    wire [`WINDOW_SIZE*32-1: 0] window_r_w;
     reg [$clog2(`KERNEL_SIZE)-1: 0] window_col_idx;
 
     Decoder #(`KERNEL_SIZE) decoder_window_col(window_col_idx, window_col);
@@ -283,7 +284,7 @@ endgenerate
 generate
     for(i=0; i<`KERNEL_SIZE; i=i+1)begin : gen_window
         wire [31: 0] window_rdata_in, window_wdata_v;
-        RDataGen data_gen(buf_size_i, data_offset, window_rdata[i*32 +: 32], window_rdata_in);
+        RDataGen data_gen(buf_size_i, data_offset, window_rdata[i], window_rdata_in);
         assign window_wdata_v = {32{~kernel_padding_x_ov & ~kernel_row_ov[i]}} & window_rdata_in;
         for(j=0; j<`KERNEL_SIZE; j=j+1)begin : gen_window_row
             wire window_fill_en = kernel_data_req & (kernel_fill_all | ~kernel_fill_all & window_col[j]) | req;
@@ -291,14 +292,14 @@ generate
 
             wire [$clog2(`WINDOW_SIZE)-1: 0] shift_idx;
             
-
+            assign window_r_w[(i*`KERNEL_SIZE+j)*32 +: 32] = window_r[i*`KERNEL_SIZE+j];
             assign shift_idx = i * `KERNEL_SIZE + j + stride_i;
             assign window_wdata = ~kernel_height_mask[i] | ~kernel_width_mask[j] | req ? 0 :
-                                  kernel_fill_all & ~window_col[j] ? window_r[shift_idx*32 +: 32] : 
+                                  kernel_fill_all & ~window_col[j] ? window_r[shift_idx] : 
                                                                     window_wdata_v;
 
             always @(posedge clk)begin
-                if(window_fill_en) window_r[(i * `KERNEL_SIZE + j)*32 +: 32] <= window_wdata;
+                if(window_fill_en) window_r[(i * `KERNEL_SIZE + j)] <= window_wdata;
             end
         end
     end
@@ -324,7 +325,7 @@ endgenerate
             end
         end
     end
-    assign window           = window_r;
+    assign window           = window_r_w;
     assign window_valid     = kernel_data_req_n & kernel_fill_all;
     assign window_finish    = kernel_data_req_end;
 endmodule
