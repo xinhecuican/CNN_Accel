@@ -10,7 +10,7 @@
 
 [指令文档可见](doc/指令.md)
 
-[软件实现示例](https://gitee.com/ffshff/la32r_soc/tree/cnn/sdk/software/examples/lenet)
+[软件实现示例](https://gitee.com/xinhecuican/cnn_accel_software)
 
 quant lenet could see: https://github.com/xinhecuican/lenet_int8
 
